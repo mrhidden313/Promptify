@@ -8,7 +8,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mrhidden313/Promptify/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/mrhidden313/Promptify?style=flat-square&label=release"></a>
+  <a href="https://github.com/mrhidden313/Promptify/raw/refs/heads/main/downloads/Promptify.exe?download=1"><strong>⬇ Download Promptify for Windows</strong></a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-50e1c1?style=flat-square"></a>
   <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-101b2c?style=flat-square">
   <img alt="Bring your own key" src="https://img.shields.io/badge/AI-bring%20your%20own%20key-5ea4ff?style=flat-square">
@@ -35,7 +38,7 @@ Promptify sits quietly above your other apps. Select text, choose a writing acti
 
 ### Portable app
 
-1. Download `Promptify.exe` from [GitHub Releases](https://github.com/mrhidden313/Promptify/releases).
+1. **[Download Promptify.exe](https://github.com/mrhidden313/Promptify/raw/refs/heads/main/downloads/Promptify.exe?download=1)** directly from this repository.
 2. Run it on Windows. Python is not required on the target PC.
 3. Open **Settings** from the floating Promptify mark or system tray.
 4. Choose a primary provider and enter your own API key. Add other keys only if you want failover.

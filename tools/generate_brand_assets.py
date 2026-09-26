@@ -1,4 +1,7 @@
+import base64
+from io import BytesIO
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -17,6 +20,8 @@ MUTED = (151, 170, 193)
 MINT = (80, 225, 193)
 BLUE = (94, 164, 255)
 FONT_DIR = Path("C:/Windows/Fonts")
+SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
+XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
 
 
 def font(size, bold=False):
@@ -149,11 +154,30 @@ def draw_workflow_frame(progress):
     return image
 
 
+def icon_from_svg():
+    svg_root = ET.parse(ROOT / "latest.svg").getroot()
+    embedded_image = svg_root.find(f".//{SVG_NAMESPACE}image")
+    if embedded_image is None:
+        raise ValueError("latest.svg does not contain an embedded image.")
+
+    image_data = embedded_image.get(XLINK_HREF) or embedded_image.get("href")
+    if not image_data or not image_data.startswith("data:image/png;base64,"):
+        raise ValueError("latest.svg must contain an embedded PNG image.")
+
+    png_bytes = base64.b64decode(image_data.split(",", 1)[1], validate=True)
+    with Image.open(BytesIO(png_bytes)) as image:
+        image.load()
+        return image.convert("RGBA")
+
+
 def main():
-    icon = draw_mark(512)
-    icon.save(ASSET_DIR / "promptify-icon.png")
-    icon.save(ASSET_DIR / "promptify.ico", format="ICO",
-              sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    icon = icon_from_svg()
+    icon.save(ASSET_DIR / "promptify-icon.png", optimize=True)
+    icon.save(
+        ASSET_DIR / "promptify.ico",
+        format="ICO",
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
 
     draw_hero().save(README_DIR / "hero.png", optimize=True)
     frames = [draw_workflow_frame(index / 20) for index in range(21)]

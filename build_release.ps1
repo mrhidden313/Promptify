@@ -25,5 +25,9 @@ if ($LASTEXITCODE -ne 0) {
 New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot "release") | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "dist\Promptify.exe") (Join-Path $PSScriptRoot "release\Promptify.exe") -Force
 
-Get-Item (Join-Path $PSScriptRoot "release\Promptify.exe") |
+New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot "downloads") | Out-Null
+Copy-Item (Join-Path $PSScriptRoot "dist\Promptify.exe") (Join-Path $PSScriptRoot "downloads\Promptify.exe") -Force
+
+Get-Item (Join-Path $PSScriptRoot "release\Promptify.exe"),
+         (Join-Path $PSScriptRoot "downloads\Promptify.exe") |
     Select-Object FullName, Length, LastWriteTime
