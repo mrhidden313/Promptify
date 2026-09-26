@@ -18,5 +18,9 @@ dist/
 release/
 nuitka-crash-report.xml
 RomanAIFixer.ico
+RomanAIFixer.spec
+app icon.png
+mediacool.png
+prepare_tk_runtime.py
 .DS_Store
 Thumbs.db
