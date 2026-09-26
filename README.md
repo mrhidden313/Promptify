@@ -31,6 +31,8 @@ Promptify sits quietly above your other apps. Select text, choose a writing acti
 - **Choose your AI provider** and bring your own API key.
 - **Optional failover** to another provider whose key you added.
 - **Default-on word typing** with a one-paste option in Settings.
+- **Configurable quick action and global shortcut**, with a default `Ctrl+Alt+F`.
+- **Single running instance** and an optional floating-icon position lock.
 - **Copyable error alerts** with credentials redacted from diagnostics.
 - **Windows DPAPI credential storage** tied to the current Windows account.
 
@@ -43,6 +45,7 @@ Promptify sits quietly above your other apps. Select text, choose a writing acti
 3. Open **Settings** from the floating Promptify mark or system tray.
 4. Choose a primary provider and enter your own API key. Add other keys only if you want failover.
 5. Select text in an app, click Promptify, and choose an action.
+6. Set the default action and shortcut in Settings; `Ctrl+Alt+F` runs the selected action by default.
 
 ### Run from source
 
@@ -85,6 +88,10 @@ The selected provider is always tried first. If **Try other configured providers
 ## Preferences
 
 - **Generation → Type the result word by word** is on by default. Turn it off for one atomic paste.
+- **Quick actions** lets you select which rewrite runs from the global shortcut. The default is **Rewrite (Same Language)**.
+- The global shortcut defaults to **Ctrl+Alt+F**. Enable or disable it, type a custom chord, or use **Record** in Settings. A shortcut needs at least one modifier and one key.
+- Use **Lock Position** in the floating icon menu to prevent accidental dragging; the position and lock state are saved.
+- Only one Promptify instance runs per Windows session. Reopening the EXE will not create another floating icon.
 - **Try other configured providers if the primary fails** is on by default and can be disabled.
 - Error alerts stay beneath the floating mark until dismissed and include **Copy details**. Copied diagnostics redact configured API keys.
 - Settings and log files remain local to the current Windows profile.

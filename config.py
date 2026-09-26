@@ -18,13 +18,18 @@ SUPPORTED_PROVIDERS = ("gemini", "openai", "deepseek", "groq", "xai")
 DEFAULT_PROVIDER_ORDER = ["gemini", "openai", "deepseek", "groq", "xai"]
 
 DEFAULT_SETTINGS = {
-    "provider": "gemini",          # "gemini" or "openai"
+    "provider": "gemini",
     "api_key": "",
     "model": "gemini-3.5-flash-lite",
     "provider_order": DEFAULT_PROVIDER_ORDER,
     "allow_provider_fallback": True,
     "word_typing_enabled": True,
-    "hotkey": "<ctrl>+<alt>+f",    # global hotkey to trigger the popup
+    "default_action": "rewrite_same",
+    "hotkey": "<ctrl>+<alt>+f",
+    "hotkey_enabled": True,
+    "position_locked": False,
+    "floating_x": 40,
+    "floating_y": 40,
 }
 
 CREDENTIAL_FIELDS = ("api_key", *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS))
@@ -110,6 +115,20 @@ def load_settings():
         merged["allow_provider_fallback"] = True
     if not isinstance(merged.get("word_typing_enabled"), bool):
         merged["word_typing_enabled"] = True
+    if merged.get("default_action") not in (
+        "rewrite_same", "roman_urdu", "translate_enhance"
+    ):
+        merged["default_action"] = DEFAULT_SETTINGS["default_action"]
+    if not isinstance(merged.get("hotkey"), str):
+        merged["hotkey"] = DEFAULT_SETTINGS["hotkey"]
+    if not isinstance(merged.get("hotkey_enabled"), bool):
+        merged["hotkey_enabled"] = DEFAULT_SETTINGS["hotkey_enabled"]
+    if not isinstance(merged.get("position_locked"), bool):
+        merged["position_locked"] = DEFAULT_SETTINGS["position_locked"]
+    for coordinate in ("floating_x", "floating_y"):
+        value = merged.get(coordinate)
+        if isinstance(value, bool) or not isinstance(value, int):
+            merged[coordinate] = DEFAULT_SETTINGS[coordinate]
     for key in ("api_key", "model", *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS)):
         if not isinstance(merged.get(key), str):
             merged[key] = "" if key != "model" else DEFAULT_SETTINGS["model"]

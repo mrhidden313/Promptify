@@ -1,8 +1,9 @@
 """
 main.py
 Entry point. Creates:
-  - A small always-on-top floating button (draggable) on screen
+  - One always-on-top floating button, with a persistent drag lock
   - A system tray icon (right-click -> Open App / Quit)
+  - A configurable global shortcut for the selected default action
   - A single app window with Home / Settings / About pages, each with a
     Back button, instead of separate popups
   - An on-screen status bubble near the floating button showing
@@ -12,7 +13,7 @@ Entry point. Creates:
 
 Run with:  python main.py
 Stop with: Ctrl+C in the terminal, or Quit from the tray icon
-Package with:  pyinstaller --onefile --noconsole --name RomanAIFixer main.py
+Package with:  .\build_release.ps1
 """
 
 import logging
@@ -29,6 +30,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pystray
+from pynput import keyboard
 from PIL import Image, ImageDraw, ImageTk
 
 from config import load_settings, save_settings
@@ -73,6 +75,93 @@ FLOATING_TRANSPARENT_COLOR = "#010203"
 LOGGER = logging.getLogger("Promptify")
 LOG_DIR = None
 LOG_FILE = None
+INSTANCE_MUTEX = None
+INSTANCE_MUTEX_NAME = "Local\\Promptify.SingleInstance.v1"
+DEFAULT_HOTKEY = "<ctrl>+<alt>+f"
+HOTKEY_MODIFIERS = ("ctrl", "alt", "shift", "cmd")
+HOTKEY_MODIFIER_ALIASES = {
+    "control": "ctrl",
+    "win": "cmd",
+    "windows": "cmd",
+    "meta": "cmd",
+}
+HOTKEY_SPECIAL_KEYS = {
+    "return": "enter",
+    "escape": "esc",
+    "del": "delete",
+    "pageup": "page_up",
+    "pagedown": "page_down",
+}
+HOTKEY_ALLOWED_KEYS = {
+    "space", "tab", "enter", "esc", "delete", "insert", "home", "end",
+    "page_up", "page_down", "up", "down", "left", "right",
+}
+
+
+def normalize_hotkey(value):
+    """Return a validated pynput hotkey string with at least one modifier."""
+    if not isinstance(value, str):
+        raise ValueError("Enter a shortcut such as Ctrl+Alt+F.")
+
+    parts = [part.strip().lower().strip("<>") for part in value.split("+")]
+    parts = [HOTKEY_MODIFIER_ALIASES.get(part, part) for part in parts if part]
+    modifiers = [part for part in parts if part in HOTKEY_MODIFIERS]
+    keys = [part for part in parts if part not in HOTKEY_MODIFIERS]
+    if len(modifiers) != len(set(modifiers)):
+        raise ValueError("A shortcut cannot repeat the same modifier.")
+    if not modifiers or len(keys) != 1:
+        raise ValueError("Use one key and at least one modifier, such as Ctrl+Alt+F.")
+
+    key = HOTKEY_SPECIAL_KEYS.get(keys[0], keys[0])
+    if not (
+        len(key) == 1 and key.isascii() and key.isalnum()
+        or key in HOTKEY_ALLOWED_KEYS
+        or key.startswith("f") and key[1:].isdigit() and 1 <= int(key[1:]) <= 24
+    ):
+        raise ValueError("Use a letter, number, function key, or supported navigation key.")
+
+    ordered_modifiers = [modifier for modifier in HOTKEY_MODIFIERS if modifier in modifiers]
+    formatted = [f"<{modifier}>" for modifier in ordered_modifiers]
+    formatted.append(key if len(key) == 1 else f"<{key}>")
+    return "+".join(formatted)
+
+
+def format_hotkey(value):
+    """Format a normalized pynput hotkey for display in Settings."""
+    parts = [part.strip("<>") for part in value.split("+")]
+    return "+".join(part.upper() if len(part) == 1 else part.title() for part in parts)
+
+
+def acquire_single_instance():
+    """Hold a named Windows mutex for this user's interactive session."""
+    global INSTANCE_MUTEX
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p
+    )
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    ctypes.set_last_error(0)
+    handle = kernel32.CreateMutexW(None, False, INSTANCE_MUTEX_NAME)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if ctypes.get_last_error() == 183:
+        kernel32.CloseHandle(handle)
+        return False
+    INSTANCE_MUTEX = handle
+    return True
+
+
+def release_single_instance():
+    global INSTANCE_MUTEX
+    if INSTANCE_MUTEX:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle(INSTANCE_MUTEX)
+        INSTANCE_MUTEX = None
 
 
 def _log_exception(context, exc, tb=None):
@@ -210,6 +299,10 @@ class App:
         self._closing = False
         self._signal_after_id = None
         self._foreground_after_id = None
+        self._hotkey_listener = None
+        self._recording_listener = None
+        self._hotkey_recording_context = None
+        self._position_locked = self.settings.get("position_locked", False)
 
         self.root = tk.Tk()
         self.root.withdraw()  # main root stays hidden; we use Toplevels
@@ -243,6 +336,20 @@ class App:
         # Tk doesn't process OS signals unless we wake it up periodically
         self._signal_after_id = self.root.after(200, self._pump_signals)
         self._foreground_after_id = self.root.after(100, self._track_foreground_window)
+        try:
+            self._configure_global_hotkey(
+                self.settings.get("hotkey", DEFAULT_HOTKEY),
+                self.settings.get("hotkey_enabled", True),
+            )
+        except Exception as exc:
+            _log_exception("Registering global shortcut", exc)
+            self.root.after(
+                300,
+                lambda: self.show_status(
+                    "The global shortcut could not be registered. Change it in Settings.",
+                    COLOR_ERROR, autohide_ms=7000,
+                ),
+            )
 
     # =========================================================================
     # Shutdown handling (Ctrl+C in PowerShell / terminal)
@@ -277,6 +384,8 @@ class App:
 
     def quit_app(self):
         self._closing = True
+        self._cancel_hotkey_recording()
+        self._stop_global_hotkey()
         for after_id in (self._signal_after_id, self._foreground_after_id):
             if after_id:
                 try:
@@ -297,6 +406,255 @@ class App:
     def _report_callback_exception(self, exc, value, tb):
         _log_exception("Tkinter callback", value, tb)
 
+    def _stop_global_hotkey(self):
+        listener = self._hotkey_listener
+        self._hotkey_listener = None
+        if listener:
+            listener.stop()
+            if listener is not threading.current_thread():
+                listener.join(timeout=1)
+
+    def _start_global_hotkey(self, hotkey):
+        normalized = normalize_hotkey(hotkey)
+        listener = keyboard.GlobalHotKeys({
+            normalized: self._dispatch_default_action,
+        })
+        started = False
+        try:
+            listener.start()
+            started = True
+            listener.wait()
+            if not listener.is_alive():
+                listener.join(timeout=0)
+                raise RuntimeError("The keyboard listener stopped before it was ready.")
+        except Exception:
+            if started:
+                listener.stop()
+                listener.join(timeout=1)
+            raise
+        self._hotkey_listener = listener
+        LOGGER.info("Global shortcut registered: %s", format_hotkey(normalized))
+        return normalized
+
+    def _configure_global_hotkey(self, hotkey, enabled):
+        normalized = normalize_hotkey(hotkey)
+        old_listener = self._hotkey_listener
+        old_hotkey = getattr(self, "_registered_hotkey", None)
+        self._stop_global_hotkey()
+        try:
+            if enabled:
+                normalized = self._start_global_hotkey(normalized)
+            self._registered_hotkey = normalized
+            self._registered_hotkey_enabled = bool(enabled)
+        except Exception:
+            if old_listener and old_hotkey:
+                try:
+                    self._start_global_hotkey(old_hotkey)
+                    self._registered_hotkey = old_hotkey
+                    self._registered_hotkey_enabled = True
+                except Exception as restore_exc:
+                    _log_exception("Restoring previous global shortcut", restore_exc)
+            raise
+        return normalized
+
+    def _dispatch_default_action(self):
+        try:
+            self.root.after(0, self._run_default_action)
+        except tk.TclError:
+            LOGGER.info("Shortcut ignored while application is closing")
+
+    def _run_default_action(self):
+        if self._closing:
+            return
+        action = self.settings.get("default_action", "rewrite_same")
+        if action not in TEMPLATES:
+            action = "rewrite_same"
+        LOGGER.info("Default shortcut action triggered: %s", action)
+        self.run_action(action)
+
+    def _hotkey_key_name(self, key):
+        modifier_aliases = {
+            "ctrl_l": "ctrl", "ctrl_r": "ctrl",
+            "alt_l": "alt", "alt_r": "alt", "alt_gr": "alt",
+            "shift": "shift", "shift_l": "shift", "shift_r": "shift",
+            "cmd": "cmd", "cmd_l": "cmd", "cmd_r": "cmd",
+        }
+        key_name = getattr(key, "name", None)
+        if key_name in modifier_aliases:
+            return modifier_aliases[key_name], True
+        if isinstance(key, keyboard.KeyCode):
+            if key.char and key.char.isascii() and key.char.isalnum():
+                return key.char.lower(), False
+            virtual_key = key.vk
+            if virtual_key is not None:
+                if 0x41 <= virtual_key <= 0x5A:
+                    return chr(virtual_key).lower(), False
+                if 0x30 <= virtual_key <= 0x39:
+                    return chr(virtual_key), False
+                if 0x70 <= virtual_key <= 0x87:
+                    return f"f{virtual_key - 0x6F}", False
+        if key_name:
+            return HOTKEY_SPECIAL_KEYS.get(key_name, key_name), False
+        return None, False
+
+    def _set_hotkey_status(self, label, text, color):
+        try:
+            if label.winfo_exists():
+                label.config(text=text, fg=color)
+        except tk.TclError:
+            pass
+
+    def _finish_hotkey_recording(self, hotkey_var, status_label, record_button,
+                                 captured_hotkey=None, cancelled=False):
+        listener = self._recording_listener
+        self._recording_listener = None
+        self._hotkey_recording_context = None
+        if listener:
+            listener.stop()
+            if listener is not threading.current_thread():
+                listener.join(timeout=1)
+        try:
+            if record_button.winfo_exists():
+                record_button.config(state="normal")
+        except tk.TclError:
+            pass
+
+        if captured_hotkey:
+            hotkey_var.set(format_hotkey(captured_hotkey))
+            self._set_hotkey_status(
+                status_label,
+                f"Shortcut captured: {format_hotkey(captured_hotkey)}. Save to apply.",
+                COLOR_SUCCESS,
+            )
+        elif cancelled:
+            self._set_hotkey_status(status_label, "Shortcut recording cancelled.", COLOR_SUBTEXT)
+        else:
+            self._set_hotkey_status(
+                status_label, "Shortcut unchanged. Save to apply other settings.", COLOR_SUBTEXT
+            )
+
+        if not self._closing:
+            try:
+                self._configure_global_hotkey(
+                    self.settings.get("hotkey", DEFAULT_HOTKEY),
+                    self.settings.get("hotkey_enabled", True),
+                )
+            except Exception as exc:
+                _log_exception("Restoring shortcut after recording", exc)
+                self._set_hotkey_status(
+                    status_label, "Could not restore the saved shortcut.", COLOR_ERROR
+                )
+
+    def _cancel_hotkey_recording(self):
+        listener = self._recording_listener
+        self._recording_listener = None
+        self._hotkey_recording_context = None
+        if listener:
+            listener.stop()
+        if hasattr(self, "_hotkey_listener"):
+            self._stop_global_hotkey()
+
+    def start_hotkey_recording(self, hotkey_var, status_label, record_button):
+        if self._recording_listener:
+            self._finish_hotkey_recording(
+                hotkey_var, status_label, record_button, cancelled=True
+            )
+            return
+
+        self._stop_global_hotkey()
+        modifiers = set()
+
+        def on_press(key):
+            key_name, is_modifier = self._hotkey_key_name(key)
+            if key_name == "esc" and not is_modifier:
+                self.root.after(
+                    0,
+                    lambda: self._finish_hotkey_recording(
+                        hotkey_var, status_label, record_button, cancelled=True
+                    ),
+                )
+                return False
+            if is_modifier:
+                modifiers.add(key_name)
+                return
+            if not modifiers or not key_name:
+                return
+            try:
+                chord = normalize_hotkey(
+                    "+".join([*sorted(modifiers), key_name])
+                )
+            except ValueError:
+                return
+            self.root.after(
+                0,
+                lambda chord=chord: self._finish_hotkey_recording(
+                    hotkey_var, status_label, record_button,
+                    captured_hotkey=chord,
+                ),
+            )
+            return False
+
+        def on_release(key):
+            key_name, is_modifier = self._hotkey_key_name(key)
+            if is_modifier:
+                modifiers.discard(key_name)
+
+        listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self._recording_listener = listener
+        self._hotkey_recording_context = (hotkey_var, status_label, record_button)
+        record_button.focus_set()
+        record_button.config(state="disabled")
+        self._set_hotkey_status(
+            status_label, "Press a shortcut with Ctrl, Alt, Shift, or Win. Esc cancels.",
+            COLOR_WARN,
+        )
+        try:
+            listener.start()
+        except Exception as exc:
+            self._recording_listener = None
+            record_button.config(state="normal")
+            self._set_hotkey_status(status_label, f"Could not record shortcut: {exc}", COLOR_ERROR)
+            try:
+                self._configure_global_hotkey(
+                    self.settings.get("hotkey", DEFAULT_HOTKEY),
+                    self.settings.get("hotkey_enabled", True),
+                )
+            except Exception as restore_exc:
+                _log_exception("Restoring shortcut after recording failure", restore_exc)
+            raise
+
+    def _persist_floating_position(self):
+        if not self.floating_btn:
+            return
+        new_settings = dict(self.settings)
+        new_settings["floating_x"] = self.floating_btn.winfo_x()
+        new_settings["floating_y"] = self.floating_btn.winfo_y()
+        new_settings["position_locked"] = self._position_locked
+        try:
+            save_settings(new_settings)
+            self.settings = new_settings
+        except Exception as exc:
+            _log_exception("Saving floating position", exc)
+            self.show_status("Could not save the floating icon position.", COLOR_ERROR)
+
+    def toggle_position_lock(self):
+        self._position_locked = not self._position_locked
+        new_settings = dict(self.settings)
+        new_settings["position_locked"] = self._position_locked
+        if self.floating_btn:
+            new_settings["floating_x"] = self.floating_btn.winfo_x()
+            new_settings["floating_y"] = self.floating_btn.winfo_y()
+        try:
+            save_settings(new_settings)
+            self.settings = new_settings
+            state = "locked" if self._position_locked else "unlocked"
+            LOGGER.info("Floating icon position %s", state)
+            self.show_status(f"Floating icon {state}.", COLOR_SUCCESS, autohide_ms=2000)
+        except Exception as exc:
+            self._position_locked = not self._position_locked
+            _log_exception("Saving floating position lock", exc)
+            self.show_status("Could not save the position setting.", COLOR_ERROR)
+
     def open_log_folder(self):
         if LOG_DIR is None:
             self.show_status("Log folder is unavailable.", COLOR_ERROR, autohide_ms=4000)
@@ -315,7 +673,13 @@ class App:
         btn = tk.Toplevel(self.root)
         btn.overrideredirect(True)
         btn.attributes("-topmost", True)
-        btn.geometry("52x52+40+40")
+        x = self.settings.get("floating_x", 40)
+        y = self.settings.get("floating_y", 40)
+        screen_width = btn.winfo_screenwidth()
+        screen_height = btn.winfo_screenheight()
+        x = min(max(0, x), max(0, screen_width - 52))
+        y = min(max(0, y), max(0, screen_height - 52))
+        btn.geometry(f"52x52+{x}+{y}")
         btn.configure(bg=FLOATING_TRANSPARENT_COLOR)
         try:
             btn.attributes("-transparentcolor", FLOATING_TRANSPARENT_COLOR)
@@ -349,19 +713,23 @@ class App:
             self._drag_data["moved"] = False
 
         def do_drag(event):
+            if self._position_locked:
+                return
             self._drag_data["moved"] = True
             x = btn.winfo_x() + (event.x - self._drag_data["x"])
             y = btn.winfo_y() + (event.y - self._drag_data["y"])
             btn.geometry(f"+{x}+{y}")
             self._reposition_status_bubble()
 
-        def on_click(event):
-            if not self._drag_data.get("moved"):
+        def on_release(event):
+            if self._drag_data.get("moved"):
+                self._persist_floating_position()
+            else:
                 self.show_option_menu(btn)
 
         canvas.bind("<ButtonPress-1>", start_drag)
         canvas.bind("<B1-Motion>", do_drag)
-        canvas.bind("<ButtonRelease-1>", on_click)
+        canvas.bind("<ButtonRelease-1>", on_release)
 
         self.floating_btn = btn
         self.build_status_bubble()
@@ -477,12 +845,24 @@ class App:
         menu = tk.Menu(self.root, tearoff=0, bg=COLOR_BG_CARD, fg=COLOR_TEXT,
                         activebackground=COLOR_ACCENT, activeforeground="white",
                         bd=0)
+        default_action = self.settings.get("default_action", "rewrite_same")
+        if default_action not in TEMPLATES:
+            default_action = "rewrite_same"
+        menu.add_command(
+            label=f"Run default: {TEMPLATES[default_action]['label']}",
+            command=self._run_default_action,
+        )
+        menu.add_separator()
         for key, tmpl in TEMPLATES.items():
             menu.add_command(
                 label=tmpl["label"],
                 command=lambda k=key: self.run_action(k),
             )
         menu.add_separator()
+        menu.add_command(
+            label="Unlock Position" if self._position_locked else "Lock Position",
+            command=self.toggle_position_lock,
+        )
         menu.add_command(label="Open App / Settings", command=lambda: self.open_page("home"))
         menu.add_command(label="Open Logs", command=self.open_log_folder)
         menu.add_command(label="Quit", command=self.quit_app)
@@ -625,9 +1005,9 @@ class App:
     def _build_app_window(self):
         win = tk.Toplevel(self.root)
         win.title("Promptify")
-        win.geometry("560x600")
+        win.geometry("600x760")
         win.configure(bg=COLOR_BG)
-        win.minsize(520, 560)
+        win.minsize(560, 660)
         win.resizable(True, True)
         win.protocol("WM_DELETE_WINDOW", win.withdraw)  # hide, don't quit whole app
         try:
@@ -644,6 +1024,10 @@ class App:
         self.page_container = container
 
     def _clear_page(self):
+        if self._recording_listener and self._hotkey_recording_context:
+            self._finish_hotkey_recording(
+                *self._hotkey_recording_context, cancelled=True
+            )
         for widget in self.page_container.winfo_children():
             widget.destroy()
 
@@ -669,6 +1053,12 @@ class App:
 
     def _render_page(self, page_name):
         self.current_page = page_name
+        if page_name == "settings":
+            self.app_win.geometry("600x760")
+            self.app_win.minsize(560, 660)
+        else:
+            self.app_win.geometry("560x600")
+            self.app_win.minsize(520, 560)
         self._clear_page()
         if page_name == "home":
             self._render_home_page()
@@ -683,8 +1073,8 @@ class App:
 
         tk.Label(
             self.page_container,
-            text="Select text anywhere on your PC, click the floating\n"
-                 "AI button, and pick an action.",
+            text="Select text and click the floating icon to choose an action.\n"
+                 "Or use the global shortcut for your selected default action.",
             font=FONT_TEXT, bg=COLOR_BG, fg=COLOR_SUBTEXT, justify="left",
         ).pack(anchor="w", padx=16, pady=(0, 16))
 
@@ -790,6 +1180,87 @@ class App:
             font=FONT_SMALL,
         ).pack(anchor="w")
 
+        tk.Label(body, text="Quick actions", font=FONT_LABEL, bg=COLOR_BG,
+                 fg=COLOR_TEXT).pack(anchor="w", pady=(12, 3))
+        action_keys = list(TEMPLATES)
+        action_labels = [TEMPLATES[key]["label"] for key in action_keys]
+        default_action = settings.get("default_action", "rewrite_same")
+        if default_action not in TEMPLATES:
+            default_action = "rewrite_same"
+        default_action_var = tk.StringVar(value=TEMPLATES[default_action]["label"])
+        action_row = tk.Frame(body, bg=COLOR_BG)
+        action_row.pack(fill="x", pady=(0, 4))
+        tk.Label(action_row, text="Default action", font=FONT_SMALL,
+                 bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(side="left", padx=(0, 8))
+        ttk.Combobox(
+            action_row, textvariable=default_action_var, values=action_labels,
+            state="readonly", width=31,
+        ).pack(side="left")
+
+        shortcut_enabled_var = tk.BooleanVar(
+            value=settings.get("hotkey_enabled", True)
+        )
+        tk.Checkbutton(
+            body, text="Enable global shortcut",
+            variable=shortcut_enabled_var, bg=COLOR_BG, fg=COLOR_TEXT,
+            selectcolor=COLOR_BG_CARD, activebackground=COLOR_BG,
+            font=FONT_SMALL,
+        ).pack(anchor="w", pady=(2, 3))
+        shortcut_row = tk.Frame(body, bg=COLOR_BG)
+        shortcut_row.pack(fill="x")
+        tk.Label(shortcut_row, text="Shortcut", font=FONT_SMALL,
+                 bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(side="left", padx=(0, 8))
+        saved_hotkey = settings.get("hotkey", DEFAULT_HOTKEY)
+        try:
+            saved_hotkey = format_hotkey(normalize_hotkey(saved_hotkey))
+        except ValueError:
+            saved_hotkey = format_hotkey(DEFAULT_HOTKEY)
+        hotkey_var = tk.StringVar(value=saved_hotkey)
+        hotkey_entry = tk.Entry(
+            shortcut_row, textvariable=hotkey_var, width=19,
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT, insertbackground=COLOR_TEXT,
+            relief="flat",
+        )
+        hotkey_entry.pack(side="left", ipady=4, padx=(0, 6))
+        record_button = tk.Button(
+            shortcut_row, text="Record", command=lambda: self.start_hotkey_recording(
+                hotkey_var, shortcut_status_label, record_button
+            ),
+            font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT,
+            activebackground=COLOR_ACCENT, activeforeground="white",
+            relief="flat", bd=0, cursor="hand2", padx=10, pady=5,
+        )
+        record_button.pack(side="left", padx=(0, 5))
+
+        def use_default_hotkey():
+            hotkey_var.set(format_hotkey(DEFAULT_HOTKEY))
+            shortcut_status_label.config(
+                text="Default shortcut restored. Save to apply.", fg=COLOR_SUBTEXT
+            )
+
+        tk.Button(
+            shortcut_row, text="Default", command=use_default_hotkey,
+            font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT,
+            activebackground=COLOR_ACCENT, activeforeground="white",
+            relief="flat", bd=0, cursor="hand2", padx=10, pady=5,
+        ).pack(side="left")
+        shortcut_status_label = tk.Label(
+            body,
+            text="The shortcut runs the selected default action. Example: Ctrl+Alt+F.",
+            font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
+            wraplength=510, justify="left",
+        )
+        shortcut_status_label.pack(anchor="w", pady=(2, 0))
+
+        position_locked_var = tk.BooleanVar(value=self._position_locked)
+        tk.Checkbutton(
+            body, text="Lock floating icon position",
+            variable=position_locked_var,
+            command=lambda: self.toggle_position_lock(),
+            bg=COLOR_BG, fg=COLOR_TEXT, selectcolor=COLOR_BG_CARD,
+            activebackground=COLOR_BG, font=FONT_SMALL,
+        ).pack(anchor="w", pady=(4, 0))
+
         tk.Label(body, text="Provider API keys", font=FONT_LABEL, bg=COLOR_BG,
                  fg=COLOR_TEXT).pack(anchor="w", pady=(14, 4))
         key_vars = {}
@@ -831,6 +1302,22 @@ class App:
             ]
             new_settings["allow_provider_fallback"] = fallback_var.get()
             new_settings["word_typing_enabled"] = typing_var.get()
+            new_settings["default_action"] = action_keys[
+                action_labels.index(default_action_var.get())
+            ]
+            new_settings["position_locked"] = self._position_locked
+            if self.floating_btn:
+                new_settings["floating_x"] = self.floating_btn.winfo_x()
+                new_settings["floating_y"] = self.floating_btn.winfo_y()
+            old_hotkey = self.settings.get("hotkey", DEFAULT_HOTKEY)
+            old_hotkey_enabled = self.settings.get("hotkey_enabled", True)
+            try:
+                normalized_hotkey = normalize_hotkey(hotkey_var.get())
+            except ValueError as e:
+                status_label.config(text=str(e), fg=COLOR_ERROR)
+                return
+            new_settings["hotkey"] = normalized_hotkey
+            new_settings["hotkey_enabled"] = shortcut_enabled_var.get()
             for provider, key_var in key_vars.items():
                 new_settings[f"{provider}_api_key"] = key_var.get().strip()
 
@@ -838,11 +1325,22 @@ class App:
                 status_label.config(text="Model name can't be empty.", fg=COLOR_ERROR)
                 return
             try:
+                self._configure_global_hotkey(
+                    normalized_hotkey, new_settings["hotkey_enabled"]
+                )
                 save_settings(new_settings)
             except Exception as e:
+                try:
+                    self._configure_global_hotkey(old_hotkey, old_hotkey_enabled)
+                except Exception as restore_exc:
+                    _log_exception("Restoring previous shortcut after save failure", restore_exc)
                 _log_exception("Saving settings", e)
-                status_label.config(text=f"Could not save: {e}", fg=COLOR_ERROR)
+                status_label.config(
+                    text=f"Could not apply settings: {e}", fg=COLOR_ERROR
+                )
                 return
+            self.settings = new_settings
+            hotkey_var.set(format_hotkey(normalized_hotkey))
             LOGGER.info(
                 "Settings saved: provider=%s model=%s api_key_configured=%s",
                 new_settings["provider"], new_settings["model"],
@@ -850,6 +1348,15 @@ class App:
             )
             self._refresh_sensitive_values(new_settings)
             status_label.config(text="Saved.", fg=COLOR_SUCCESS)
+            shortcut_status_label.config(
+                text=(
+                    f"Shortcut {format_hotkey(normalized_hotkey)} runs "
+                    f"{TEMPLATES[new_settings['default_action']]['label']}."
+                    if new_settings["hotkey_enabled"]
+                    else "Global shortcut is disabled."
+                ),
+                fg=COLOR_SUCCESS,
+            )
 
         RoundButton(body, "Save", save).pack(anchor="w", pady=(16, 0))
 
@@ -941,8 +1448,30 @@ class App:
 
 
 if __name__ == "__main__":
+    try:
+        is_primary_instance = acquire_single_instance()
+    except Exception as exc:
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            f"Promptify could not check whether it is already running.\n\n{exc}",
+            "Promptify startup error",
+            0x10,
+        )
+        raise
+    if not is_primary_instance:
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Promptify is already running. Use the existing floating icon or system tray.",
+            "Promptify is already open",
+            0x40,
+        )
+        raise SystemExit(0)
+
     configure_logging()
-    LOGGER.info("Application starting")
-    app = App()
-    app.run()
-    LOGGER.info("Application stopped")
+    try:
+        LOGGER.info("Application starting")
+        app = App()
+        app.run()
+        LOGGER.info("Application stopped")
+    finally:
+        release_single_instance()
