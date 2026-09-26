@@ -49,9 +49,14 @@ _STRICT_RULES = (
     "4. Your ONLY job is the specific text-transformation task described "
     "above. Apply it to the entire input text, then output the result and "
     "stop.\n"
-    "5. Output must contain ONLY the transformed text — no labels like "
-    "'Here is the corrected text:', no quotes around it, no markdown "
-    "formatting, no preamble, no follow-up."
+    "5. Keep short messages concise and natural; do not force headings onto "
+    "a one-line message. For longer or multi-part text, improve scanability "
+    "with a clean structure and brief bracketed headings such as [Main Point], "
+    "[Details], or [Next Step] only when the source supports them. Preserve "
+    "the original language and script for headings. Do not invent facts or "
+    "sections.\n"
+    "6. Output ONLY the transformed text. Do not add an introduction, answer, "
+    "explanation, conversational wrapper, or follow-up."
 )
 
 TEMPLATES = {

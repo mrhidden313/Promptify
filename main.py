@@ -68,6 +68,7 @@ FONT_TEXT = ("Segoe UI", 10)
 FONT_SMALL = ("Segoe UI", 8)
 FONT_BTN = ("Segoe UI", 10, "bold")
 ICON_NAME = "assets/promptify-icon.png"
+FLOATING_TRANSPARENT_COLOR = "#010203"
 
 LOGGER = logging.getLogger("Promptify")
 LOG_DIR = None
@@ -315,12 +316,17 @@ class App:
         btn.overrideredirect(True)
         btn.attributes("-topmost", True)
         btn.geometry("52x52+40+40")
+        btn.configure(bg=FLOATING_TRANSPARENT_COLOR)
+        try:
+            btn.attributes("-transparentcolor", FLOATING_TRANSPARENT_COLOR)
+        except tk.TclError:
+            pass
         try:
             btn.attributes("-alpha", 0.95)
         except Exception:
             pass
 
-        canvas = tk.Canvas(btn, width=52, height=52, bg="#101B2C",
+        canvas = tk.Canvas(btn, width=52, height=52, bg=FLOATING_TRANSPARENT_COLOR,
                             highlightthickness=0)
         canvas.pack(fill="both", expand=True)
         try:
