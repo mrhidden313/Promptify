@@ -14,14 +14,17 @@ import win32crypt
 # of the .exe and doesn't need admin rights to write.
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".roman_ai_fixer")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
-SUPPORTED_PROVIDERS = ("gemini", "openai", "deepseek", "groq", "xai")
-DEFAULT_PROVIDER_ORDER = ["gemini", "openai", "deepseek", "groq", "xai"]
+SUPPORTED_PROVIDERS = ("gemini", "openai", "deepseek", "groq", "xai", "custom")
+DEFAULT_PROVIDER_ORDER = ["gemini", "openai", "deepseek", "groq", "xai", "custom"]
 
 DEFAULT_SETTINGS = {
     "provider": "gemini",
     "api_key": "",
     "model": "gemini-3.5-flash-lite",
     "provider_order": DEFAULT_PROVIDER_ORDER,
+    "custom_provider_name": "OpenRouter",
+    "custom_base_url": "https://openrouter.ai/api/v1",
+    "custom_model": "",
     "allow_provider_fallback": True,
     "word_typing_enabled": True,
     "default_action": "rewrite_same",
@@ -32,7 +35,9 @@ DEFAULT_SETTINGS = {
     "floating_y": 40,
 }
 
-CREDENTIAL_FIELDS = ("api_key", *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS))
+CREDENTIAL_FIELDS = (
+    "api_key", *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS)
+)
 ENCRYPTED_CREDENTIALS_FIELD = "encrypted_api_keys"
 DPAPI_ENTROPY = b"Promptify/credentials/v1"
 
@@ -129,9 +134,20 @@ def load_settings():
         value = merged.get(coordinate)
         if isinstance(value, bool) or not isinstance(value, int):
             merged[coordinate] = DEFAULT_SETTINGS[coordinate]
-    for key in ("api_key", "model", *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS)):
+    for key in (
+        "api_key", "model", "custom_provider_name", "custom_base_url",
+        "custom_model", *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS),
+    ):
         if not isinstance(merged.get(key), str):
-            merged[key] = "" if key != "model" else DEFAULT_SETTINGS["model"]
+            merged[key] = (
+                DEFAULT_SETTINGS[key]
+                if key in DEFAULT_SETTINGS
+                else ""
+            )
+    merged["custom_provider_name"] = (
+        merged["custom_provider_name"].strip()[:40]
+        or DEFAULT_SETTINGS["custom_provider_name"]
+    )
     if merged["model"] == "gemini-flash-latest":
         merged["model"] = "gemini-3.5-flash-lite"
     merged["credential_store_error"] = credential_store_error

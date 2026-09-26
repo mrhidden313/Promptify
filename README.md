@@ -71,13 +71,18 @@ The result is `release\Promptify.exe`. The release bundles Python, dependencies,
 
 Promptify does not ship with API keys. Each user supplies their own provider credentials; a key is sent only to that provider’s endpoint. Keys are encrypted with Windows DPAPI in local settings and are not portable to another Windows account/device.
 
-| Provider | Create or manage a key | Default model |
+| Provider | Create or manage a key | Model |
 | --- | --- | --- |
 | Gemini | [Google AI Studio](https://aistudio.google.com/apikey) | `gemini-3.5-flash-lite` |
 | OpenAI | [OpenAI API keys](https://platform.openai.com/api-keys) | `gpt-4o-mini` |
 | Groq | [Groq Console](https://console.groq.com/keys) | `llama-3.1-8b-instant` |
 | DeepSeek | [DeepSeek Platform](https://platform.deepseek.com/api_keys) | `deepseek-chat` |
 | xAI | [xAI Console](https://console.x.ai/) | `grok-3-mini` |
+| OpenRouter or another OpenAI-compatible API | Use **OpenRouter / Custom** in Settings | Enter the exact model ID shown by that API |
+
+For OpenRouter, its API key is available from [OpenRouter Keys](https://openrouter.ai/keys). In Settings, select **OpenRouter / Custom**, keep or enter `https://openrouter.ai/api/v1`, enter the exact model ID from OpenRouter (for example, the model's full provider/model identifier), and add your key in **Custom API key**. The saved key is DPAPI-protected and sent only to the configured custom endpoint. HTTPS is required for remote endpoints; plain HTTP is accepted only for localhost.
+
+The Settings content scrolls independently, and **Save** stays pinned at the bottom of the window.
 
 Provider pricing, free quotas, and availability are controlled by each provider and can change. Promptify itself has no subscription or hosted account requirement.
 

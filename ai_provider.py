@@ -10,6 +10,7 @@ consistent no matter which provider/model the user picks.
 import json
 import socket
 import time
+from urllib.parse import urlsplit, urlunsplit
 import urllib.request
 import urllib.error
 
@@ -119,6 +120,7 @@ PROVIDER_DEFAULTS = {
     "groq": "llama-3.1-8b-instant",
     "deepseek": "deepseek-chat",
     "xai": "grok-3-mini",
+    "custom": "",
 }
 
 PROVIDER_LABELS = {
@@ -127,6 +129,7 @@ PROVIDER_LABELS = {
     "groq": "Groq",
     "deepseek": "DeepSeek",
     "xai": "xAI / Grok",
+    "custom": "OpenRouter",
 }
 
 COMPATIBLE_ENDPOINTS = {
@@ -135,7 +138,50 @@ COMPATIBLE_ENDPOINTS = {
     "xai": "https://api.x.ai/v1/chat/completions",
 }
 
-DEFAULT_PROVIDER_ORDER = ["gemini", "openai", "deepseek", "groq", "xai"]
+DEFAULT_PROVIDER_ORDER = ["gemini", "openai", "deepseek", "groq", "xai", "custom"]
+
+
+def provider_label(provider, settings=None):
+    if provider == "custom" and settings:
+        custom_name = settings.get("custom_provider_name")
+        if isinstance(custom_name, str) and custom_name.strip():
+            return custom_name.strip()
+    return PROVIDER_LABELS.get(provider, provider)
+
+
+def compatible_chat_completions_url(base_url):
+    """Validate a compatible API base URL and return its chat endpoint."""
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise AIError("Enter a custom provider base URL.")
+    value = base_url.strip()
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise AIError("The custom provider URL is invalid.") from exc
+    if (
+        parsed.scheme not in ("https", "http")
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise AIError(
+            "Use an HTTP(S) base URL without credentials, query parameters, or fragments."
+        )
+    if parsed.scheme == "http" and hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise AIError("Custom API keys require HTTPS, except for local localhost endpoints.")
+
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        endpoint_path = path
+    elif path.endswith("/v1"):
+        endpoint_path = f"{path}/chat/completions"
+    else:
+        endpoint_path = f"{path}/v1/chat/completions"
+    return urlunsplit((parsed.scheme, parsed.netloc, endpoint_path, "", ""))
 
 
 def primary_provider(settings):
@@ -174,6 +220,14 @@ def configured_providers(settings):
         key = settings.get(f"{provider}_api_key", "")
         if provider == primary and not key:
             key = settings.get("api_key", "")
+        if provider == "custom":
+            model = settings.get("custom_model", "").strip()
+            try:
+                compatible_chat_completions_url(settings.get("custom_base_url", ""))
+            except AIError:
+                continue
+            if not model:
+                continue
         if key:
             available.append(provider)
     return available
@@ -221,8 +275,14 @@ def _call_openai(api_key: str, model: str, system_prompt: str, user_text: str) -
         raise AIError(f"OpenAI returned an unexpected response format: {e}")
 
 
-def _call_openai_compatible(provider, api_key, model, system_prompt, user_text):
-    url = COMPATIBLE_ENDPOINTS[provider]
+def _call_openai_compatible(
+    provider, api_key, model, system_prompt, user_text, *,
+    endpoint=None, display_name=None,
+):
+    url = endpoint or COMPATIBLE_ENDPOINTS.get(provider)
+    if not url:
+        raise AIError(f"No compatible endpoint is configured for {provider}.")
+    label = display_name or PROVIDER_LABELS.get(provider, provider)
     payload = {
         "model": model or PROVIDER_DEFAULTS[provider],
         "messages": [
@@ -245,7 +305,6 @@ def _call_openai_compatible(provider, api_key, model, system_prompt, user_text):
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
-        label = PROVIDER_LABELS[provider]
         if e.code in (401, 403):
             raise AIError(f"{label} rejected the API key. Check it in Settings.")
         if e.code == 429:
@@ -254,14 +313,14 @@ def _call_openai_compatible(provider, api_key, model, system_prompt, user_text):
             raise AIError(f"{label} is temporarily unavailable ({e.code}).")
         raise AIError(f"{label} API error ({e.code}): {body[:300]}")
     except (socket.timeout, urllib.error.URLError) as e:
-        raise AIError(_network_friendly_message(e, PROVIDER_LABELS[provider]))
+        raise AIError(_network_friendly_message(e, label))
     except Exception as e:
-        raise AIError(f"{PROVIDER_LABELS[provider]} request failed: {e}")
+        raise AIError(f"{label} request failed: {e}")
 
     try:
         return json.loads(raw)["choices"][0]["message"]["content"].strip()
     except (json.JSONDecodeError, KeyError, IndexError) as e:
-        raise AIError(f"{PROVIDER_LABELS[provider]} returned an unexpected response: {e}")
+        raise AIError(f"{label} returned an unexpected response: {e}")
 
 
 def _call_gemini(api_key: str, model: str, system_prompt: str, user_text: str) -> str:
@@ -312,7 +371,10 @@ def _call_gemini(api_key: str, model: str, system_prompt: str, user_text: str) -
         raise AIError(f"Gemini returned an unexpected response format: {e}")
 
 
-def process_text(text: str, template_key: str, provider: str, api_key: str, model: str) -> str:
+def process_text(
+    text: str, template_key: str, provider: str, api_key: str, model: str,
+    *, settings=None,
+) -> str:
     """
     Main entry point used by the UI.
     template_key: one of "rewrite_same", "roman_urdu", "translate_enhance"
@@ -332,6 +394,16 @@ def process_text(text: str, template_key: str, provider: str, api_key: str, mode
         return _call_gemini(api_key, model, system_prompt, text)
     elif provider in COMPATIBLE_ENDPOINTS:
         return _call_openai_compatible(provider, api_key, model, system_prompt, text)
+    elif provider == "custom":
+        custom_settings = settings or {}
+        endpoint = compatible_chat_completions_url(
+            custom_settings.get("custom_base_url", "")
+        )
+        return _call_openai_compatible(
+            provider, api_key, model, system_prompt, text,
+            endpoint=endpoint,
+            display_name=provider_label(provider, custom_settings),
+        )
     else:
         raise AIError(f"Unknown provider: {provider}")
 
@@ -351,13 +423,21 @@ def process_with_fallback(text, template_key, settings, on_provider=None):
         if on_provider:
             on_provider(provider)
         model = (
+            settings.get("custom_model") if provider == "custom" else
             settings.get(f"{provider}_model")
             or (settings.get("model") if provider == primary else None)
-            or PROVIDER_DEFAULTS[provider]
+            or PROVIDER_DEFAULTS.get(provider, "")
         )
+        if provider == "custom" and not model:
+            failures.append(
+                f"{provider_label(provider, settings)}: enter a model ID in Settings."
+            )
+            continue
         for attempt in range(2):
             try:
-                result = process_text(text, template_key, provider, api_key, model)
+                result = process_text(
+                    text, template_key, provider, api_key, model, settings=settings
+                )
                 if not result or not result.strip():
                     raise AIError("Provider returned an empty response.")
                 return result
@@ -365,11 +445,11 @@ def process_with_fallback(text, template_key, settings, on_provider=None):
                 if attempt == 0 and _is_transient_error(exc):
                     time.sleep(1)
                     continue
-                failures.append(f"{PROVIDER_LABELS.get(provider, provider)}: {exc}")
+                failures.append(f"{provider_label(provider, settings)}: {exc}")
                 break
             except Exception as exc:
                 failures.append(
-                    f"{PROVIDER_LABELS.get(provider, provider)}: unexpected error ({type(exc).__name__})."
+                    f"{provider_label(provider, settings)}: unexpected error ({type(exc).__name__})."
                 )
                 break
 

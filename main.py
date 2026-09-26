@@ -39,6 +39,8 @@ from ai_provider import (
     TEMPLATES,
     PROVIDER_DEFAULTS,
     PROVIDER_LABELS,
+    provider_label,
+    compatible_chat_completions_url,
     configured_providers,
     process_with_fallback,
     AIError,
@@ -917,13 +919,16 @@ class App:
                 )
                 return
 
-            self.show_status(f"Contacting {PROVIDER_LABELS.get(settings['provider'], settings['provider'])}...", COLOR_TEXT)
+            self.show_status(
+                f"Contacting {provider_label(settings['provider'], settings)}...",
+                COLOR_TEXT,
+            )
             attempted_providers = []
 
             def report_provider(provider):
                 attempted_providers.append(provider)
                 self.show_status(
-                    f"Trying {PROVIDER_LABELS.get(provider, provider)}...", COLOR_TEXT
+                    f"Trying {provider_label(provider, settings)}...", COLOR_TEXT
                 )
 
             try:
@@ -962,7 +967,7 @@ class App:
             try:
                 if settings.get("word_typing_enabled", True):
                     self.show_status(
-                        f"Writing with {PROVIDER_LABELS.get(used_provider, used_provider)}... 0%",
+                        f"Writing with {provider_label(used_provider, settings)}... 0%",
                         COLOR_TEXT,
                     )
                     paste_text_streaming(
@@ -974,7 +979,7 @@ class App:
                     )
                 else:
                     self.show_status(
-                        f"Pasting with {PROVIDER_LABELS.get(used_provider, used_provider)}...",
+                        f"Pasting with {provider_label(used_provider, settings)}...",
                         COLOR_TEXT,
                     )
                     paste_text(result, target_hwnd=self._last_external_hwnd)
@@ -1028,6 +1033,7 @@ class App:
             self._finish_hotkey_recording(
                 *self._hotkey_recording_context, cancelled=True
             )
+        self.root.unbind_all("<MouseWheel>")
         for widget in self.page_container.winfo_children():
             widget.destroy()
 
@@ -1089,7 +1095,7 @@ class App:
         ready_providers = configured_providers(settings)
         status_ok = bool(ready_providers)
         status_text = (
-            f"Ready - primary: {PROVIDER_LABELS[settings['provider']]}; "
+            f"Ready - primary: {provider_label(settings['provider'], settings)}; "
             f"{len(ready_providers)} provider key(s) configured"
             if status_ok else
             "No provider key set yet"
@@ -1111,29 +1117,71 @@ class App:
         self._page_header("Settings", show_back=True, back_target="home")
 
         settings = load_settings()
-        body = tk.Frame(self.page_container, bg=COLOR_BG)
-        body.pack(fill="both", expand=True, padx=16, pady=8)
+        footer = tk.Frame(self.page_container, bg=COLOR_BG)
+        footer.pack(side="bottom", fill="x", padx=16, pady=(4, 12))
+        content = tk.Frame(self.page_container, bg=COLOR_BG)
+        content.pack(fill="both", expand=True, padx=16, pady=(4, 0))
+        canvas = tk.Canvas(content, bg=COLOR_BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(content, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        body = tk.Frame(canvas, bg=COLOR_BG)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def update_scroll_region(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def fit_content_width(event):
+            canvas.itemconfigure(body_window, width=event.width)
+
+        body.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", fit_content_width)
+        canvas.bind("<Enter>", lambda _event: canvas.bind_all(
+            "<MouseWheel>",
+            lambda event: canvas.yview_scroll(
+                -int(event.delta / 120) if event.delta else 0, "units"
+            ),
+        ))
+        canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
 
         tk.Label(body, text="Provider", font=FONT_LABEL, bg=COLOR_BG,
                  fg=COLOR_TEXT).pack(anchor="w", pady=(8, 4))
         provider_var = tk.StringVar(value=settings["provider"])
-        prow = tk.Frame(body, bg=COLOR_BG)
-        prow.pack(anchor="w")
-        provider_choices = ["gemini", "openai", "groq", "deepseek", "xai"]
-        for provider in provider_choices:
-            tk.Radiobutton(
-                prow, text=PROVIDER_LABELS[provider], variable=provider_var,
-                value=provider, bg=COLOR_BG, fg=COLOR_TEXT,
-                selectcolor=COLOR_BG_CARD, activebackground=COLOR_BG,
-                font=FONT_SMALL,
-            ).pack(side="left", padx=(0 if provider == "gemini" else 6, 0))
+        provider_choices = list(PROVIDER_DEFAULTS)
+        provider_names = {
+            provider: (
+                "OpenRouter / Custom" if provider == "custom"
+                else PROVIDER_LABELS[provider]
+            )
+            for provider in provider_choices
+        }
+        provider_combo = ttk.Combobox(
+            body, textvariable=provider_var,
+            values=[provider_names[provider] for provider in provider_choices],
+            state="readonly", width=34,
+        )
+        provider_combo.pack(anchor="w")
+
+        def selected_provider_key():
+            selected_label = provider_var.get()
+            return next(
+                provider for provider, label in provider_names.items()
+                if label == selected_label
+            )
+
+        provider_var.set(provider_names.get(settings["provider"], provider_names["gemini"]))
 
         tk.Label(body, text="Model name", font=FONT_LABEL, bg=COLOR_BG,
                  fg=COLOR_TEXT).pack(anchor="w", pady=(14, 4))
         model_values = {
-            provider: settings.get(f"{provider}_model") or (
-                settings.get("model") if provider == settings["provider"]
-                else PROVIDER_DEFAULTS[provider]
+            provider: (
+                settings.get("custom_model", "")
+                if provider == "custom"
+                else settings.get(f"{provider}_model") or (
+                    settings.get("model") if provider == settings["provider"]
+                    else PROVIDER_DEFAULTS[provider]
+                )
             )
             for provider in provider_choices
         }
@@ -1142,19 +1190,55 @@ class App:
 
         def update_default_model(*_):
             previous_provider = selected_model_provider["value"]
-            next_provider = provider_var.get()
+            next_provider = selected_provider_key()
             model_values[previous_provider] = model_var.get().strip()
             model_var.set(model_values[next_provider])
             selected_model_provider["value"] = next_provider
 
         provider_var.trace_add("write", update_default_model)
-        model_entry = tk.Entry(body, textvariable=model_var, width=40,
+        model_entry = tk.Entry(body, textvariable=model_var, width=52,
                                 bg=COLOR_BG_CARD, fg=COLOR_TEXT,
                                 insertbackground=COLOR_TEXT, relief="flat")
         model_entry.pack(anchor="w", ipady=5)
-        tk.Label(body, text="Primary model; fallback models use sensible defaults.",
+        tk.Label(body, text="Use the exact model ID from your provider.",
                  font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT
                  ).pack(anchor="w", pady=(2, 0))
+
+        custom_frame = tk.LabelFrame(
+            body, text="OpenAI-compatible custom provider",
+            bg=COLOR_BG, fg=COLOR_TEXT, padx=10, pady=8,
+        )
+        custom_frame.pack(fill="x", pady=(12, 2))
+        tk.Label(
+            custom_frame,
+            text="For OpenRouter or another compatible API. The key is sent only to this endpoint.",
+            font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
+            wraplength=460, justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+        custom_name_var = tk.StringVar(
+            value=settings.get("custom_provider_name", "OpenRouter")
+        )
+        tk.Label(custom_frame, text="Provider name", font=FONT_SMALL,
+                 bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(anchor="w")
+        tk.Entry(
+            custom_frame, textvariable=custom_name_var, width=52,
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT, insertbackground=COLOR_TEXT,
+            relief="flat",
+        ).pack(anchor="w", fill="x", ipady=4, pady=(2, 6))
+        custom_url_var = tk.StringVar(
+            value=settings.get("custom_base_url", "https://openrouter.ai/api/v1")
+        )
+        tk.Label(custom_frame, text="API base URL", font=FONT_SMALL,
+                 bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(anchor="w")
+        tk.Entry(
+            custom_frame, textvariable=custom_url_var, width=52,
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT, insertbackground=COLOR_TEXT,
+            relief="flat",
+        ).pack(anchor="w", fill="x", ipady=4, pady=(2, 2))
+        tk.Label(
+            custom_frame, text="Example: https://openrouter.ai/api/v1",
+            font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
+        ).pack(anchor="w")
 
         fallback_var = tk.BooleanVar(value=settings.get("allow_provider_fallback", True))
         tk.Checkbutton(
@@ -1267,8 +1351,12 @@ class App:
         for provider in provider_choices:
             key_row = tk.Frame(body, bg=COLOR_BG)
             key_row.pack(anchor="w", fill="x", pady=1)
-            tk.Label(key_row, text=f"{PROVIDER_LABELS[provider]:<12}",
-                     width=12, anchor="w", font=FONT_SMALL,
+            label_text = (
+                "Custom API key" if provider == "custom"
+                else f"{PROVIDER_LABELS[provider]} API key"
+            )
+            tk.Label(key_row, text=label_text,
+                     width=19, anchor="w", font=FONT_SMALL,
                      bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(side="left")
             key_var = tk.StringVar(value=settings.get(
                 f"{provider}_api_key",
@@ -1282,23 +1370,28 @@ class App:
                      )
 
         status_label = tk.Label(
-            body, text=settings.get("credential_store_error", ""),
+            footer, text=settings.get("credential_store_error", ""),
             font=FONT_TEXT, bg=COLOR_BG,
             fg=COLOR_ERROR if settings.get("credential_store_error") else COLOR_TEXT,
-            wraplength=500, justify="left",
+            wraplength=390, justify="left", anchor="w",
         )
-        status_label.pack(anchor="w", pady=(10, 0))
+        status_label.pack(side="left", fill="x", expand=True, padx=(0, 12))
 
         def save():
             new_settings = dict(settings)
-            new_settings["provider"] = provider_var.get()
+            selected_provider = selected_provider_key()
+            model_values[selected_model_provider["value"]] = model_var.get().strip()
+            new_settings["provider"] = selected_provider
             new_settings["model"] = model_var.get().strip()
-            new_settings[f"{provider_var.get()}_model"] = model_var.get().strip()
-            new_settings["api_key"] = key_vars[provider_var.get()].get().strip()
+            if selected_provider == "custom":
+                new_settings["custom_model"] = model_var.get().strip()
+            else:
+                new_settings[f"{selected_provider}_model"] = model_var.get().strip()
+            new_settings["api_key"] = key_vars[selected_provider].get().strip()
             current_order = settings.get("provider_order", DEFAULT_PROVIDER_ORDER)
-            new_settings["provider_order"] = [provider_var.get()] + [
+            new_settings["provider_order"] = [selected_provider] + [
                 provider for provider in current_order
-                if provider != provider_var.get()
+                if provider != selected_provider
             ]
             new_settings["allow_provider_fallback"] = fallback_var.get()
             new_settings["word_typing_enabled"] = typing_var.get()
@@ -1306,6 +1399,10 @@ class App:
                 action_labels.index(default_action_var.get())
             ]
             new_settings["position_locked"] = self._position_locked
+            new_settings["custom_provider_name"] = (
+                custom_name_var.get().strip()[:40] or "Custom provider"
+            )
+            new_settings["custom_base_url"] = custom_url_var.get().strip()
             if self.floating_btn:
                 new_settings["floating_x"] = self.floating_btn.winfo_x()
                 new_settings["floating_y"] = self.floating_btn.winfo_y()
@@ -1321,7 +1418,20 @@ class App:
             for provider, key_var in key_vars.items():
                 new_settings[f"{provider}_api_key"] = key_var.get().strip()
 
-            if not new_settings["model"]:
+            custom_key = key_vars["custom"].get().strip()
+            if (selected_provider == "custom" and custom_key) and not new_settings["custom_model"]:
+                status_label.config(
+                    text="Enter the exact custom model ID, or choose another provider.",
+                    fg=COLOR_ERROR,
+                )
+                return
+            if selected_provider == "custom" or custom_key:
+                try:
+                    compatible_chat_completions_url(new_settings["custom_base_url"])
+                except AIError as e:
+                    status_label.config(text=str(e), fg=COLOR_ERROR)
+                    return
+            if selected_provider != "custom" and not new_settings["model"]:
                 status_label.config(text="Model name can't be empty.", fg=COLOR_ERROR)
                 return
             try:
@@ -1358,7 +1468,7 @@ class App:
                 fg=COLOR_SUCCESS,
             )
 
-        RoundButton(body, "Save", save).pack(anchor="w", pady=(16, 0))
+        RoundButton(footer, "Save", save, width=112).pack(side="right")
 
     # ---------------- About page ----------------
     def _render_about_page(self):
