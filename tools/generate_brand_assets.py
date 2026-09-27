@@ -32,35 +32,7 @@ def font(size, bold=False):
     return ImageFont.load_default()
 
 
-def draw_mark(size):
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    pad = size * 0.035
-    draw.rounded_rectangle(
-        (pad, pad, size - pad, size - pad),
-        radius=size * 0.27,
-        fill=(17, 35, 55, 255),
-        outline=(55, 91, 124, 255),
-        width=max(1, size // 90),
-    )
-    line = max(3, size // 11)
-    left = size * 0.31
-    top = size * 0.24
-    right = size * 0.70
-    bottom = size * 0.76
-    mid = size * 0.49
-    draw.line((left, bottom, left, top), fill=MINT, width=line)
-    draw.line((left, top, right * 0.92, top), fill=MINT, width=line)
-    draw.arc((left, top, right, mid + size * 0.04), 265, 95, fill=MINT, width=line)
-    draw.line((left, mid + size * 0.02, right * 0.82, mid + size * 0.02), fill=MINT, width=line)
-    spark = size * 0.075
-    sx, sy = size * 0.77, size * 0.25
-    draw.line((sx, sy - spark, sx, sy + spark), fill=BLUE, width=max(2, size // 44))
-    draw.line((sx - spark, sy, sx + spark, sy), fill=BLUE, width=max(2, size // 44))
-    return image
-
-
-def draw_hero():
+def draw_hero(logo):
     width, height = 1440, 900
     image = Image.new("RGB", (width, height), NAVY)
     pixels = image.load()
@@ -75,8 +47,8 @@ def draw_hero():
             )
 
     draw = ImageDraw.Draw(image)
-    mark = draw_mark(58)
-    image.paste(mark, (66, 42), mark)
+    logo = logo.resize((58, 58), Image.Resampling.LANCZOS)
+    image.paste(logo, (66, 42), logo)
     draw.text((137, 54), "Promptify", font=font(27, True), fill=TEXT)
     draw.text((1040, 61), "WINDOWS  /  OPEN SOURCE  /  BYOK", font=font(15, True), fill=MUTED)
 
@@ -181,7 +153,7 @@ def main():
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
 
-    draw_hero().save(README_DIR / "hero.png", optimize=True)
+    draw_hero(icon).save(README_DIR / "hero.png", optimize=True)
     frames = [draw_workflow_frame(index / 20, icon) for index in range(21)]
     frames += [frames[-1]] * 5
     frames[0].save(
