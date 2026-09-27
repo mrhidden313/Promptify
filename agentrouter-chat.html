@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>AgentRouter Chat</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      --page: #f6f7f8;
+      --surface: #fff;
+      --surface-raised: #f0f2f4;
+      --text: #20252b;
+      --muted: #68717c;
+      --line: #dfe3e7;
+      --accent: #176b52;
+      --accent-text: #fff;
+      --focus: #26866a;
+      --user: #e8f4ef;
+      --error: #b42318;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #171a1e;
+        --surface: #202429;
+        --surface-raised: #292e34;
+        --text: #edf0f2;
+        --muted: #aab2bb;
+        --line: #3a4149;
+        --accent: #8fc8ad;
+        --accent-text: #10251d;
+        --focus: #9bd5bb;
+        --user: #263b32;
+        --error: #ff8178;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      min-height: 100dvh;
+      background: var(--page);
+      color: var(--text);
+    }
+
+    button, input, textarea { font: inherit; }
+
+    button {
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0 14px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      transition: transform 160ms cubic-bezier(.2,.8,.2,1), background-color 160ms ease;
+    }
+
+    button:hover:not(:disabled) { background: var(--surface-raised); }
+    button:active:not(:disabled) { transform: scale(.98); }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+
+    :focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      width: min(100%, 900px);
+      min-height: 100vh;
+      min-height: 100dvh;
+      margin: 0 auto;
+      padding: 20px clamp(14px, 3vw, 28px) 18px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
+    .header-actions { display: flex; gap: 8px; }
+    .secondary { color: var(--muted); }
+
+    details {
+      margin: 14px 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+
+    summary {
+      padding: 12px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .settings {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, .65fr);
+      gap: 12px;
+      padding: 0 14px 14px;
+    }
+
+    .field { display: grid; gap: 6px; }
+    .field.wide { grid-column: 1 / -1; }
+    label { font-size: 12px; font-weight: 600; }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 10px 11px;
+      background: var(--page);
+      color: var(--text);
+    }
+
+    .hint {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .hint a { color: inherit; }
+    .warning { color: var(--error); }
+
+    #messages {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+      min-height: 220px;
+      padding: 24px 2px;
+      scrollbar-color: var(--line) transparent;
+    }
+
+    .empty {
+      margin: auto;
+      max-width: 420px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .empty strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .message {
+      max-width: min(82%, 680px);
+      padding: 12px 15px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      border-color: transparent;
+      background: var(--user);
+    }
+
+    .message.assistant { align-self: flex-start; }
+    .message.error { color: var(--error); }
+    .message-label { margin-bottom: 5px; color: var(--muted); font-size: 11px; }
+
+    form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 10px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    #prompt {
+      min-height: 48px;
+      max-height: 180px;
+      resize: vertical;
+      line-height: 1.45;
+    }
+
+    #send {
+      min-width: 84px;
+      border-color: transparent;
+      background: var(--accent);
+      color: var(--accent-text);
+      font-weight: 650;
+    }
+
+    #status {
+      grid-column: 1 / -1;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    #status.error { color: var(--error); }
+
+    @media (max-width: 560px) {
+      .app { padding: 14px 12px; }
+      .settings { grid-template-columns: 1fr; }
+      .field.wide { grid-column: auto; }
+      .message { max-width: 94%; }
+      .header-actions button { padding: 0 10px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <h1>AgentRouter Chat</h1>
+      <div class="header-actions">
+        <button class="secondary" id="clear" type="button">New chat</button>
+      </div>
+    </header>
+
+    <details open>
+      <summary>Connection settings</summary>
+      <div class="settings">
+        <div class="field wide">
+          <label for="api-key">API key</label>
+          <input id="api-key" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="Paste a newly rotated key">
+          <p class="hint warning">Use a rotated key. This page keeps it only in memory while open. Do not publish or share this file.</p>
+        </div>
+        <div class="field">
+          <label for="endpoint">API base URL</label>
+          <input id="endpoint" type="url" value="https://agentrouter.org/v1" autocomplete="url">
+        </div>
+        <div class="field">
+          <label for="model">Model ID</label>
+          <input id="model" type="text" value="claude-opus-5" spellcheck="false">
+        </div>
+        <p class="hint wide">Use the exact model ID shown in your AgentRouter console. Requests go directly from this browser to AgentRouter.</p>
+      </div>
+    </details>
+
+    <section id="messages" aria-label="Conversation" aria-live="polite">
+      <div class="empty" id="empty">
+        <strong>What would you like to ask?</strong>
+        Ask a question to start a conversation with your selected model.
+      </div>
+    </section>
+
+    <form id="chat-form">
+      <textarea id="prompt" rows="1" aria-label="Message"
+                placeholder="Message AgentRouter..." required></textarea>
+      <button id="send" type="submit">Send</button>
+      <div id="status" role="status" aria-live="polite"></div>
+    </form>
+  </main>
+
+  <script>
+    (() => {
+      const keyInput = document.querySelector("#api-key");
+      const endpointInput = document.querySelector("#endpoint");
+      const modelInput = document.querySelector("#model");
+      const promptInput = document.querySelector("#prompt");
+      const messagesEl = document.querySelector("#messages");
+      const emptyEl = document.querySelector("#empty");
+      const statusEl = document.querySelector("#status");
+      const sendButton = document.querySelector("#send");
+      const history = [];
+      let busy = false;
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message;
+        statusEl.classList.toggle("error", isError);
+      }
+
+      function safeErrorDetail(detail, apiKey) {
+        return String(detail)
+          .replaceAll(apiKey, "[redacted]")
+          .replace(/sk-[A-Za-z0-9_-]{12,}/g, "[redacted]")
+          .replace(/[\u0000-\u001f\u007f]+/g, " ")
+          .trim()
+          .slice(0, 300);
+      }
+
+      function addMessage(role, content, isError = false) {
+        emptyEl?.remove();
+        const item = document.createElement("article");
+        item.className = `message ${role}${isError ? " error" : ""}`;
+        const label = document.createElement("div");
+        label.className = "message-label";
+        label.textContent = isError ? "Error" : role === "user" ? "You" : "Assistant";
+        const body = document.createElement("div");
+        body.textContent = content;
+        item.append(label, body);
+        messagesEl.append(item);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return item;
+      }
+
+      function endpointUrl(base) {
+        const value = base.trim().replace(/\/+$/, "");
+        if (!value) throw new Error("Enter the API base URL.");
+        const url = new URL(value);
+        if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+          throw new Error("Use HTTPS for remote API endpoints.");
+        }
+        if (url.username || url.password || url.search || url.hash) {
+          throw new Error("The base URL must not contain credentials, a query, or a fragment.");
+        }
+        if (url.pathname.endsWith("/chat/completions")) return url.href;
+        if (url.pathname.endsWith("/v1")) return `${value}/chat/completions`;
+        return `${value}/v1/chat/completions`;
+      }
+
+      async function sendMessage(text) {
+        if (busy) return;
+        const apiKey = keyInput.value.trim();
+        if (!apiKey) {
+          document.querySelector("details").open = true;
+          keyInput.focus();
+          setStatus("Paste your rotated API key in Connection settings.", true);
+          return;
+        }
+        if (/\r|\n/.test(apiKey)) {
+          setStatus("The API key must be on one line. Remove line breaks and try again.", true);
+          return;
+        }
+        const model = modelInput.value.trim();
+        if (!model) {
+          setStatus("Enter the exact model ID from your AgentRouter console.", true);
+          modelInput.focus();
+          return;
+        }
+
+        let url;
+        try {
+          url = endpointUrl(endpointInput.value);
+        } catch (error) {
+          setStatus(error.message, true);
+          endpointInput.focus();
+          return;
+        }
+
+        history.push({ role: "user", content: text });
+        addMessage("user", text);
+        promptInput.value = "";
+        busy = true;
+        sendButton.disabled = true;
+        sendButton.textContent = "Sending";
+        setStatus("Waiting for AgentRouter...");
+
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            mode: "cors",
+            credentials: "omit",
+            referrerPolicy: "no-referrer",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages: history,
+              temperature: 0.3,
+            }),
+          });
+          const data = await response.json().catch(() => null);
+          if (!response.ok) {
+            const detail = safeErrorDetail(
+              data?.error?.message || data?.message || `HTTP ${response.status}`,
+              apiKey,
+            );
+            if (response.status === 401 || response.status === 403) {
+              throw new Error(
+                `AgentRouter rejected authentication (${response.status}): ${detail}`,
+              );
+            }
+            if (response.status === 404 || response.status === 503) {
+              throw new Error(`Model or route unavailable (${response.status}). Verify the exact model ID in your console.`);
+            }
+            throw new Error(`AgentRouter error (${response.status}): ${String(detail).slice(0, 300)}`);
+          }
+          const answer = data?.choices?.[0]?.message?.content;
+          if (typeof answer !== "string" || !answer.trim()) {
+            throw new Error("AgentRouter returned no text. Check the model and try again.");
+          }
+          history.push({ role: "assistant", content: answer });
+          addMessage("assistant", answer);
+          setStatus("Reply received.");
+        } catch (error) {
+          history.pop();
+          const message = error instanceof TypeError
+            ? "Network or browser CORS error. Check your connection and try again."
+            : error.message;
+          addMessage("assistant", message, true);
+          setStatus(message, true);
+        } finally {
+          busy = false;
+          sendButton.disabled = false;
+          sendButton.textContent = "Send";
+          promptInput.focus();
+        }
+      }
+
+      document.querySelector("#chat-form").addEventListener("submit", event => {
+        event.preventDefault();
+        const text = promptInput.value.trim();
+        if (text) sendMessage(text);
+      });
+
+      promptInput.addEventListener("keydown", event => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          document.querySelector("#chat-form").requestSubmit();
+        }
+      });
+
+      document.querySelector("#clear").addEventListener("click", () => {
+        if (busy) return;
+        history.length = 0;
+        messagesEl.replaceChildren();
+        messagesEl.append(emptyEl);
+        setStatus("Conversation cleared.");
+        promptInput.focus();
+      });
+    })();
+  </script>
+</body>
+</html>

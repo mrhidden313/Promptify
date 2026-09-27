@@ -47,6 +47,16 @@ Promptify sits quietly above your other apps. Select text, choose a writing acti
 5. Select text in an app, click Promptify, and choose an action.
 6. Set the default action and shortcut in Settings; `Ctrl+Alt+F` runs the selected action by default.
 
+### AgentRouter chat
+
+Use the [standalone AgentRouter chat page](https://github.com/mrhidden313/Promptify/raw/refs/heads/main/agentrouter-chat.html?download=1) to test questions directly with an OpenAI-compatible model:
+
+1. Download the HTML file and open it in a browser.
+2. Enter your own AgentRouter API key, the exact model ID from your console, and `https://agentrouter.org/v1`.
+3. Send a message. The page shows AgentRouter's response or its exact error.
+
+The key stays in the open page's memory and is cleared when the page is reloaded or closed. Requests go directly from your browser to AgentRouter. Never put an API key in this repository or share it publicly. The GitHub README itself cannot run the chat interface.
+
 ### Run from source
 
 Requires Windows, Python 3.14+, and a provider API key for actual generation.
