@@ -121,11 +121,13 @@ def draw_hero():
     return image
 
 
-def draw_workflow_frame(progress):
+def draw_workflow_frame(progress, logo):
     width, height = 1200, 675
     image = Image.new("RGB", (width, height), NAVY)
     draw = ImageDraw.Draw(image)
-    draw.text((62, 48), "PROMPTIFY  /  IN THE FLOW", font=font(17, True), fill=MINT)
+    logo = logo.resize((38, 38), Image.Resampling.LANCZOS)
+    image.paste(logo, (62, 37), logo)
+    draw.text((112, 48), "PROMPTIFY  /  IN THE FLOW", font=font(17, True), fill=MINT)
     draw.text((62, 88), "A better draft, right where you work.", font=font(37, True), fill=TEXT)
 
     draw.rounded_rectangle((62, 166, 1138, 596), radius=20,
@@ -180,7 +182,7 @@ def main():
     )
 
     draw_hero().save(README_DIR / "hero.png", optimize=True)
-    frames = [draw_workflow_frame(index / 20) for index in range(21)]
+    frames = [draw_workflow_frame(index / 20, icon) for index in range(21)]
     frames += [frames[-1]] * 5
     frames[0].save(
         README_DIR / "workflow.gif",
