@@ -49,9 +49,9 @@ Promptify sits quietly above your other apps. Select text, choose a writing acti
 
 ### AgentRouter chat
 
-Use the [standalone AgentRouter chat page](https://github.com/mrhidden313/Promptify/raw/refs/heads/main/agentrouter-chat.html?download=1) to test questions directly with an OpenAI-compatible model:
+Use the [standalone AgentRouter chat page](https://github.com/mrhidden313/Promptify/blob/main/agentrouter-chat.html) to test questions directly with an OpenAI-compatible model:
 
-1. Download the HTML file and open it in a browser.
+1. On the file page, click **Download raw file**, then open the downloaded HTML in a browser.
 2. Enter your own AgentRouter API key, the exact model ID from your console, and `https://agentrouter.org/v1`.
 3. Send a message. The page shows AgentRouter's response or its exact error.
 
