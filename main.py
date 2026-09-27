@@ -40,6 +40,7 @@ from ai_provider import (
     PROVIDER_DEFAULTS,
     PROVIDER_LABELS,
     provider_label,
+    normalize_api_key,
     compatible_chat_completions_url,
     configured_providers,
     process_with_fallback,
@@ -1387,7 +1388,6 @@ class App:
                 new_settings["custom_model"] = model_var.get().strip()
             else:
                 new_settings[f"{selected_provider}_model"] = model_var.get().strip()
-            new_settings["api_key"] = key_vars[selected_provider].get().strip()
             current_order = settings.get("provider_order", DEFAULT_PROVIDER_ORDER)
             new_settings["provider_order"] = [selected_provider] + [
                 provider for provider in current_order
@@ -1416,9 +1416,18 @@ class App:
             new_settings["hotkey"] = normalized_hotkey
             new_settings["hotkey_enabled"] = shortcut_enabled_var.get()
             for provider, key_var in key_vars.items():
-                new_settings[f"{provider}_api_key"] = key_var.get().strip()
+                try:
+                    new_settings[f"{provider}_api_key"] = normalize_api_key(
+                        key_var.get(), provider_label(provider, new_settings)
+                    )
+                except AIError as e:
+                    status_label.config(text=str(e), fg=COLOR_ERROR)
+                    return
 
-            custom_key = key_vars["custom"].get().strip()
+            new_settings["api_key"] = new_settings[
+                f"{selected_provider}_api_key"
+            ]
+            custom_key = new_settings["custom_api_key"]
             if (selected_provider == "custom" and custom_key) and not new_settings["custom_model"]:
                 status_label.config(
                     text="Enter the exact custom model ID, or choose another provider.",

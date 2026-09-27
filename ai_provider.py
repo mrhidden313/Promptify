@@ -116,6 +116,17 @@ def provider_label(provider, settings=None):
     return PROVIDER_LABELS.get(provider, provider)
 
 
+def normalize_api_key(api_key, provider_name):
+    if not isinstance(api_key, str):
+        raise AIError(f"{provider_name} API key must be text.")
+    normalized = api_key.strip()
+    if "\r" in normalized or "\n" in normalized:
+        raise AIError(
+            f"{provider_name} API key contains line breaks. Paste only the key on one line in Settings."
+        )
+    return normalized
+
+
 def compatible_chat_completions_url(base_url):
     """Validate a compatible API base URL and return its chat endpoint."""
     if not isinstance(base_url, str) or not base_url.strip():
@@ -347,6 +358,7 @@ def process_text(
     template_key: one of "rewrite_same", "roman_urdu", "translate_enhance"
     provider: "openai" or "gemini"
     """
+    api_key = normalize_api_key(api_key, provider_label(provider, settings))
     if not api_key:
         raise AIError("No API key set. Open Settings and add your API key first.")
 
