@@ -28,6 +28,7 @@ DEFAULT_SETTINGS = {
     "allow_provider_fallback": True,
     "word_typing_enabled": True,
     "prompt_mode": "default",
+    "custom_prompt_template": "",
     "default_action": "rewrite_same",
     "hotkey": "<ctrl>+<alt>+f",
     "hotkey_enabled": True,
@@ -121,7 +122,7 @@ def load_settings():
         merged["allow_provider_fallback"] = True
     if not isinstance(merged.get("word_typing_enabled"), bool):
         merged["word_typing_enabled"] = True
-    if merged.get("prompt_mode") not in ("default", "developer"):
+    if merged.get("prompt_mode") not in ("default", "developer", "custom"):
         merged["prompt_mode"] = DEFAULT_SETTINGS["prompt_mode"]
     if merged.get("default_action") not in (
         "rewrite_same", "roman_urdu", "translate_enhance"
@@ -139,7 +140,8 @@ def load_settings():
             merged[coordinate] = DEFAULT_SETTINGS[coordinate]
     for key in (
         "api_key", "model", "custom_provider_name", "custom_base_url",
-        "custom_model", *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS),
+        "custom_model", "custom_prompt_template",
+        *(f"{provider}_api_key" for provider in SUPPORTED_PROVIDERS),
     ):
         if not isinstance(merged.get(key), str):
             merged[key] = (

@@ -102,7 +102,7 @@ The selected provider is always tried first. If **Try other configured providers
 
 ## Preferences
 
-- **Prompt mode** defaults to **Default**, which keeps the current writing behavior. Choose **Developer** for prompts intended for coding agents; it preserves technical details and task scope across all three writing actions.
+- **Prompt mode** defaults to **Default**, which keeps the current writing behavior. **Developer** is for prompts intended for coding agents. **Custom** lets you save your own instruction; Promptify appends the selected text after it and replaces the selection with the AI result.
 - **Generation → Type the result word by word** is on by default. Turn it off for one atomic paste.
 - **Quick actions** lets you select which rewrite runs from the global shortcut. The default is **Rewrite (Same Language)**.
 - The global shortcut defaults to **Ctrl+Alt+F**. Enable or disable it, type a custom chord, or use **Record** in Settings. A shortcut needs at least one modifier and one key.

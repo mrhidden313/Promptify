@@ -1146,14 +1146,20 @@ class App:
         ))
         canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
 
-        tk.Label(body, text="Prompt mode", font=FONT_LABEL, bg=COLOR_BG,
-                 fg=COLOR_TEXT).pack(anchor="w", pady=(8, 4))
+        prompt_mode_panel = tk.Frame(body, bg=COLOR_BG)
+        prompt_mode_panel.pack(fill="x", anchor="w", pady=(8, 0))
+        tk.Label(prompt_mode_panel, text="Prompt mode", font=FONT_LABEL,
+                 bg=COLOR_BG, fg=COLOR_TEXT).pack(anchor="w", pady=(0, 4))
         prompt_mode_var = tk.StringVar(
             value=settings.get("prompt_mode", "default")
         )
-        mode_row = tk.Frame(body, bg=COLOR_BG)
+        mode_row = tk.Frame(prompt_mode_panel, bg=COLOR_BG)
         mode_row.pack(anchor="w")
-        for mode, label in (("default", "Default"), ("developer", "Developer")):
+        for mode, label in (
+            ("default", "Default"),
+            ("developer", "Developer"),
+            ("custom", "Custom"),
+        ):
             tk.Radiobutton(
                 mode_row, text=label, value=mode, variable=prompt_mode_var,
                 indicatoron=False, padx=12, pady=5, bd=0,
@@ -1162,11 +1168,47 @@ class App:
                 activeforeground="white", font=FONT_SMALL, cursor="hand2",
             ).pack(side="left", padx=(0, 6))
         tk.Label(
-            body,
-            text="Developer mode is for prompts to coding agents. It preserves technical details and task scope.",
+            prompt_mode_panel,
+            text="Default and Developer use built-in prompts. Custom sends your template followed by the selected text.",
             font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
             wraplength=500, justify="left",
         ).pack(anchor="w", pady=(3, 0))
+
+        custom_template_frame = tk.Frame(prompt_mode_panel, bg=COLOR_BG)
+        tk.Label(
+            custom_template_frame, text="Your template",
+            font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
+        ).pack(anchor="w", pady=(7, 3))
+        custom_template_input_frame = tk.Frame(
+            custom_template_frame, bg=COLOR_BG
+        )
+        custom_template_input_frame.pack(fill="x")
+        custom_template_text = tk.Text(
+            custom_template_input_frame, height=6, wrap="word",
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT, insertbackground=COLOR_TEXT,
+            relief="flat", font=FONT_TEXT, padx=7, pady=6,
+        )
+        custom_template_scrollbar = ttk.Scrollbar(
+            custom_template_input_frame, orient="vertical",
+            command=custom_template_text.yview,
+        )
+        custom_template_text.configure(
+            yscrollcommand=custom_template_scrollbar.set
+        )
+        custom_template_text.pack(side="left", fill="x", expand=True)
+        custom_template_scrollbar.pack(side="right", fill="y")
+        custom_template_text.insert(
+            "1.0", settings.get("custom_prompt_template", "")
+        )
+
+        def update_prompt_mode(*_):
+            if prompt_mode_var.get() == "custom":
+                custom_template_frame.pack(fill="x", pady=(0, 4))
+            else:
+                custom_template_frame.pack_forget()
+
+        prompt_mode_var.trace_add("write", update_prompt_mode)
+        update_prompt_mode()
 
         tk.Label(body, text="Provider", font=FONT_LABEL, bg=COLOR_BG,
                  fg=COLOR_TEXT).pack(anchor="w", pady=(8, 4))
@@ -1418,6 +1460,18 @@ class App:
             new_settings["allow_provider_fallback"] = fallback_var.get()
             new_settings["word_typing_enabled"] = typing_var.get()
             new_settings["prompt_mode"] = prompt_mode_var.get()
+            new_settings["custom_prompt_template"] = custom_template_text.get(
+                "1.0", "end-1c"
+            )
+            if (
+                new_settings["prompt_mode"] == "custom"
+                and not new_settings["custom_prompt_template"].strip()
+            ):
+                status_label.config(
+                    text="Enter your custom prompt template or choose another mode.",
+                    fg=COLOR_ERROR,
+                )
+                return
             new_settings["default_action"] = action_keys[
                 action_labels.index(default_action_var.get())
             ]
