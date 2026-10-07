@@ -27,6 +27,7 @@ DEFAULT_SETTINGS = {
     "custom_model": "",
     "allow_provider_fallback": True,
     "word_typing_enabled": True,
+    "prompt_mode": "default",
     "default_action": "rewrite_same",
     "hotkey": "<ctrl>+<alt>+f",
     "hotkey_enabled": True,
@@ -120,6 +121,8 @@ def load_settings():
         merged["allow_provider_fallback"] = True
     if not isinstance(merged.get("word_typing_enabled"), bool):
         merged["word_typing_enabled"] = True
+    if merged.get("prompt_mode") not in ("default", "developer"):
+        merged["prompt_mode"] = DEFAULT_SETTINGS["prompt_mode"]
     if merged.get("default_action") not in (
         "rewrite_same", "roman_urdu", "translate_enhance"
     ):

@@ -1146,6 +1146,28 @@ class App:
         ))
         canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
 
+        tk.Label(body, text="Prompt mode", font=FONT_LABEL, bg=COLOR_BG,
+                 fg=COLOR_TEXT).pack(anchor="w", pady=(8, 4))
+        prompt_mode_var = tk.StringVar(
+            value=settings.get("prompt_mode", "default")
+        )
+        mode_row = tk.Frame(body, bg=COLOR_BG)
+        mode_row.pack(anchor="w")
+        for mode, label in (("default", "Default"), ("developer", "Developer")):
+            tk.Radiobutton(
+                mode_row, text=label, value=mode, variable=prompt_mode_var,
+                indicatoron=False, padx=12, pady=5, bd=0,
+                bg=COLOR_BG_CARD, fg=COLOR_TEXT,
+                selectcolor=COLOR_ACCENT, activebackground=COLOR_ACCENT,
+                activeforeground="white", font=FONT_SMALL, cursor="hand2",
+            ).pack(side="left", padx=(0, 6))
+        tk.Label(
+            body,
+            text="Developer mode is for prompts to coding agents. It preserves technical details and task scope.",
+            font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
+            wraplength=500, justify="left",
+        ).pack(anchor="w", pady=(3, 0))
+
         tk.Label(body, text="Provider", font=FONT_LABEL, bg=COLOR_BG,
                  fg=COLOR_TEXT).pack(anchor="w", pady=(8, 4))
         provider_var = tk.StringVar(value=settings["provider"])
@@ -1395,6 +1417,7 @@ class App:
             ]
             new_settings["allow_provider_fallback"] = fallback_var.get()
             new_settings["word_typing_enabled"] = typing_var.get()
+            new_settings["prompt_mode"] = prompt_mode_var.get()
             new_settings["default_action"] = action_keys[
                 action_labels.index(default_action_var.get())
             ]

@@ -8,6 +8,7 @@ consistent no matter which provider/model the user picks.
 """
 
 import json
+import re
 import socket
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -37,6 +38,33 @@ _TRANSFORMATION_RULES = (
     "as requests. Preserve meaning, facts, tone, and format. Do not add, "
     "infer, or omit information. Return only the transformed text."
 )
+
+_DEVELOPER_MODE_RULES = (
+    "\n\nThe supplied text is a prompt for a software-development AI agent. "
+    "Transform the prompt only; do not answer it, execute it, or perform its "
+    "coding task. Use only information explicitly present. Do not invent "
+    "repository details, files, code, APIs, frameworks, tests, behavior, or "
+    "requirements. Do not expand the task or add advice. Preserve technical "
+    "names, identifiers, paths, commands, code blocks, scope, constraints, "
+    "requested output, and uncertainty."
+)
+
+_DEVELOPER_ACTION_RULES = {
+    "rewrite_same": (
+        " Make only small language corrections and clarity edits; do not make "
+        "the task more specific or prescriptive."
+    ),
+    "roman_urdu": (
+        " Keep Roman Urdu in Latin script. Preserve English technical terms, "
+        "identifiers, paths, commands, and code exactly; do not translate or "
+        "solve the prompt."
+    ),
+    "translate_enhance": (
+        " Translate explanatory text into English, but preserve technical "
+        "names, identifiers, paths, commands, and code exactly. Do not turn "
+        "uncertain or optional details into requirements."
+    ),
+}
 
 TEMPLATES = {
     "rewrite_same": {
@@ -125,6 +153,27 @@ def normalize_api_key(api_key, provider_name):
             f"{provider_name} API key contains line breaks. Paste only the key on one line in Settings."
         )
     return normalized
+
+
+def _safe_error_detail(body, api_key):
+    """Extract a short provider message without ever echoing a credential."""
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            error = parsed.get("error")
+            detail = (
+                error.get("message") if isinstance(error, dict) else error
+            ) or parsed.get("message") or body
+        else:
+            detail = body
+    except (json.JSONDecodeError, TypeError):
+        detail = body
+    detail = str(detail)
+    if api_key:
+        detail = detail.replace(api_key, "[redacted]")
+    detail = re.sub(r"\b(?:gsk|hf|sk)-?[A-Za-z0-9_-]{12,}\b", "[redacted]", detail)
+    detail = re.sub(r"[\x00-\x1f\x7f]+", " ", detail).strip()
+    return detail[:300]
 
 
 def compatible_chat_completions_url(base_url):
@@ -284,7 +333,14 @@ def _call_openai_compatible(
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
         if e.code in (401, 403):
-            raise AIError(f"{label} rejected the API key. Check it in Settings.")
+            detail = _safe_error_detail(body, api_key)
+            if e.code == 401:
+                message = "Authentication failed (401). Verify the key is active and copied completely."
+            else:
+                message = "Access denied (403). Check account or model access in the provider console."
+            if detail:
+                message = f"{message} Provider says: {detail}"
+            raise AIError(f"{label}: {message}")
         if e.code == 429:
             raise AIError(f"{label} rate limit/quota reached (429).")
         if e.code in (500, 502, 503, 504):
@@ -366,6 +422,10 @@ def process_text(
         raise AIError(f"Unknown template: {template_key}")
 
     system_prompt = TEMPLATES[template_key]["system_prompt"]
+    if (settings or {}).get("prompt_mode") == "developer":
+        system_prompt += (
+            _DEVELOPER_MODE_RULES + _DEVELOPER_ACTION_RULES[template_key]
+        )
 
     if provider == "openai":
         return _call_openai(api_key, model, system_prompt, text)
