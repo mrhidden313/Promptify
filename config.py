@@ -26,6 +26,7 @@ DEFAULT_SETTINGS = {
     "custom_base_url": "https://openrouter.ai/api/v1",
     "custom_model": "",
     "allow_provider_fallback": True,
+    "ai_actions_enabled": True,
     "word_typing_enabled": True,
     "prompt_mode": "default",
     "custom_prompt_template": "",
@@ -120,6 +121,8 @@ def load_settings():
     ]
     if not isinstance(merged.get("allow_provider_fallback"), bool):
         merged["allow_provider_fallback"] = True
+    if not isinstance(merged.get("ai_actions_enabled"), bool):
+        merged["ai_actions_enabled"] = True
     if not isinstance(merged.get("word_typing_enabled"), bool):
         merged["word_typing_enabled"] = True
     if merged.get("prompt_mode") not in ("default", "developer", "custom"):

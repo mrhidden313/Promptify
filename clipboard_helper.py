@@ -21,6 +21,10 @@ class ClipboardError(Exception):
     pass
 
 
+class PasteCancelled(Exception):
+    """Raised when streaming output is stopped by the user."""
+
+
 def _simulate(key_char):
     """Press Ctrl+<key_char>, with clear errors if key simulation fails
     (e.g. some locked-down/admin windows block synthetic input)."""
@@ -88,12 +92,15 @@ def get_selected_text(timeout=1.0, target_hwnd=None) -> str:
     return selected
 
 
-def paste_text(text: str, target_hwnd=None):
+def paste_text(text: str, target_hwnd=None, cancel_event=None):
     """
     Puts `text` on the clipboard and simulates Ctrl+V to paste it into
     whatever field currently has focus (replacing the selection).
     Raises ClipboardError if the clipboard can't be written to.
     """
+    if cancel_event and cancel_event.is_set():
+        raise PasteCancelled("Writing was canceled.")
+
     if target_hwnd:
         try:
             user32 = ctypes.windll.user32
@@ -106,16 +113,23 @@ def paste_text(text: str, target_hwnd=None):
         except Exception:
             pass
 
+    if cancel_event and cancel_event.is_set():
+        raise PasteCancelled("Writing was canceled.")
+
     try:
         pyperclip.copy(text)
     except Exception as e:
         raise ClipboardError(f"Can't write to the system clipboard: {e}")
 
     time.sleep(0.1)
+    if cancel_event and cancel_event.is_set():
+        raise PasteCancelled("Writing was canceled.")
     _simulate('v')
 
 
-def paste_text_streaming(text: str, target_hwnd=None, on_progress=None):
+def paste_text_streaming(
+    text: str, target_hwnd=None, on_progress=None, cancel_event=None
+):
     """Replace the selection, then paste short chunks to create a readable stream."""
     if target_hwnd:
         try:
@@ -132,6 +146,8 @@ def paste_text_streaming(text: str, target_hwnd=None, on_progress=None):
     chunks = [chunk for chunk in re.split(r"(\s+)", text) if chunk]
     total = max(len(chunks), 1)
     for index, chunk in enumerate(chunks, start=1):
+        if cancel_event and cancel_event.is_set():
+            raise PasteCancelled("Writing was canceled.")
         try:
             pyperclip.copy(chunk)
         except Exception as e:

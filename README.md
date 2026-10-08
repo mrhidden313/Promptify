@@ -32,6 +32,7 @@ Promptify sits quietly above your other apps. Select text, choose a writing acti
 - **Optional failover** to another provider whose key you added.
 - **Default-on word typing** with a one-paste option in Settings.
 - **Configurable quick action and global shortcut**, with a default `Ctrl+Alt+F`.
+- **Cancel active requests** from the status alert and disable future AI actions from the floating menu.
 - **Single running instance** and an optional floating-icon position lock.
 - **Copyable error alerts** with credentials redacted from diagnostics.
 - **Windows DPAPI credential storage** tied to the current Windows account.
@@ -90,7 +91,7 @@ Promptify does not ship with API keys. Each user supplies their own provider cre
 | xAI | [xAI Console](https://console.x.ai/) | `grok-3-mini` |
 | OpenRouter or another OpenAI-compatible API | Use **OpenRouter / Custom** in Settings | Enter the exact model ID shown by that API |
 
-For OpenRouter, its API key is available from [OpenRouter Keys](https://openrouter.ai/keys). In Settings, select **OpenRouter / Custom**, keep or enter `https://openrouter.ai/api/v1`, enter the exact model ID from OpenRouter (for example, the model's full provider/model identifier), and add your key in **Custom API key**. The saved key is DPAPI-protected and sent only to the configured custom endpoint. HTTPS is required for remote endpoints; plain HTTP is accepted only for localhost.
+For OpenRouter, its API key is available from [OpenRouter Keys](https://openrouter.ai/keys). In Settings, select **OpenRouter / Custom**, keep or enter `https://openrouter.ai/api/v1` as the base URL, enter the exact model ID from OpenRouter (for example, the model's full provider/model identifier) separately in **Model**, and add your key in **Custom API key**. Do not append the model ID to the base URL. The saved key is DPAPI-protected and sent only to the configured custom endpoint. HTTPS is required for remote endpoints; plain HTTP is accepted only for localhost.
 
 The Settings content scrolls independently, and **Save** stays pinned at the bottom of the window.
 
@@ -105,6 +106,8 @@ The selected provider is always tried first. If **Try other configured providers
 - **Prompt mode** defaults to **Default**, which keeps the current writing behavior. **Developer** is for prompts intended for coding agents. **Custom** lets you save your own instruction; Promptify appends the selected text after it and replaces the selection with the AI result.
 - **Generation → Type the result word by word** is on by default. Turn it off for one atomic paste.
 - **Quick actions** lets you select which rewrite runs from the global shortcut. The default is **Rewrite (Same Language)**.
+- **AI requests enabled** in the floating menu pauses menu actions and the global shortcut. Turning it off also cancels any active request.
+- Use **Cancel** on the status alert to stop an active request; canceled responses are not pasted. During word-by-word output, **Stop writing** halts further chunks, though text already written remains.
 - The global shortcut defaults to **Ctrl+Alt+F**. Enable or disable it, type a custom chord, or use **Record** in Settings. A shortcut needs at least one modifier and one key.
 - Use **Lock Position** in the floating icon menu to prevent accidental dragging; the position and lock state are saved.
 - Only one Promptify instance runs per Windows session. Reopening the EXE will not create another floating icon.
@@ -115,6 +118,8 @@ The selected provider is always tried first. If **Try other configured providers
 ## Troubleshooting
 
 Use **Open Logs** from the floating mark or tray menu. The log folder is `%LOCALAPPDATA%\Promptify\logs`. Error alerts can be copied with **Copy details** and shared for diagnosis; API keys are redacted.
+
+For OpenRouter, use `https://openrouter.ai/api/v1` as the base URL and put the model ID in **Model**. A DNS or connection message means the app could not reach/resolve the configured host; it does not by itself indicate a bad API key. A 401/403 response points to key or account access instead.
 
 - **No provider key**: add a key in Settings for the selected provider or enable a configured fallback.
 - **401/403**: check that provider’s key in Settings and verify it is active in its console.

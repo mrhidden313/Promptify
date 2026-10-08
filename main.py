@@ -45,12 +45,15 @@ from ai_provider import (
     configured_providers,
     process_with_fallback,
     AIError,
+    CancellationToken,
+    RequestCancelled,
 )
 from clipboard_helper import (
     get_selected_text,
     paste_text,
     paste_text_streaming,
     ClipboardError,
+    PasteCancelled,
 )
 
 
@@ -306,10 +309,16 @@ class App:
         self._recording_listener = None
         self._hotkey_recording_context = None
         self._position_locked = self.settings.get("position_locked", False)
+        self._ai_actions_enabled = self.settings.get("ai_actions_enabled", True)
+        self._active_action_lock = threading.Lock()
+        self._active_action_token = None
 
         self.root = tk.Tk()
         self.root.withdraw()  # main root stays hidden; we use Toplevels
         self.root.report_callback_exception = self._report_callback_exception
+        self._ai_actions_enabled_var = tk.BooleanVar(
+            master=self.root, value=self._ai_actions_enabled
+        )
 
         # ---- App window (Home / Settings / About) ----
         self.app_win = None
@@ -321,6 +330,7 @@ class App:
         self.status_bubble = None
         self.status_label = None
         self.status_copy_button = None
+        self.status_cancel_button = None
         self._status_copy_text = ""
         self._status_after_id = None
 
@@ -468,6 +478,9 @@ class App:
 
     def _run_default_action(self):
         if self._closing:
+            return
+        if not self._ai_actions_enabled:
+            self.show_status("AI requests are disabled in the floating menu.", COLOR_WARN)
             return
         action = self.settings.get("default_action", "rewrite_same")
         if action not in TEMPLATES:
@@ -764,6 +777,12 @@ class App:
             relief="flat", bd=0, cursor="hand2",
         )
         self.status_copy_button.pack(side="left")
+        self.status_cancel_button = tk.Button(
+            actions, text="Cancel", command=self.cancel_active_action,
+            font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_WARN,
+            activebackground=COLOR_BG_CARD, activeforeground=COLOR_ERROR,
+            relief="flat", bd=0, cursor="hand2",
+        )
         tk.Button(
             actions, text="Dismiss", command=self.hide_status,
             font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_SUBTEXT,
@@ -826,6 +845,7 @@ class App:
                 self.status_copy_button.pack_forget()
                 autohide = autohide_ms
             self.status_bubble.deiconify()
+            self._refresh_status_actions()
             self.status_bubble.lift()
             self._reposition_status_bubble()
             if self._status_after_id:
@@ -837,6 +857,42 @@ class App:
                 )
         self.root.after(0, _update)
 
+    def _refresh_status_actions(self):
+        with self._active_action_lock:
+            token = self._active_action_token
+        can_cancel = (
+            token is not None
+            and not token.is_finished
+            and token.phase in ("request", "writing")
+            and not token.is_cancelled
+        )
+        if can_cancel:
+            self.status_cancel_button.config(
+                text="Stop writing" if token.phase == "writing" else "Cancel"
+            )
+            if not self.status_cancel_button.winfo_manager():
+                self.status_cancel_button.pack(side="right", padx=(0, 8))
+        else:
+            self.status_cancel_button.pack_forget()
+
+    def cancel_active_action(self):
+        with self._active_action_lock:
+            token = self._active_action_token
+        if (
+            token is None
+            or token.is_finished
+            or token.phase not in ("request", "writing")
+            or token.is_cancelled
+        ):
+            return
+        token.cancel()
+        message = (
+            "Stopping generated text. Text already written will remain."
+            if token.phase == "writing"
+            else "Canceling the AI request..."
+        )
+        self.show_status(message, COLOR_WARN)
+
     def hide_status(self):
         if self.status_bubble:
             self.root.after(0, self.status_bubble.withdraw)
@@ -844,22 +900,62 @@ class App:
     # =========================================================================
     # Option menu (right-click style popup from the floating button)
     # =========================================================================
+    def _on_ai_actions_toggle(self):
+        enabled = bool(self._ai_actions_enabled_var.get())
+        if enabled == self._ai_actions_enabled:
+            return
+
+        new_settings = dict(self.settings)
+        new_settings["ai_actions_enabled"] = enabled
+        try:
+            save_settings(new_settings)
+        except Exception as exc:
+            _log_exception("Saving AI actions setting", exc)
+            self._ai_actions_enabled_var.set(self._ai_actions_enabled)
+            self.show_status(
+                "Could not save the AI actions setting.", COLOR_ERROR
+            )
+            return
+
+        self.settings = new_settings
+        self._ai_actions_enabled = enabled
+        if not enabled:
+            with self._active_action_lock:
+                token = self._active_action_token
+            if token and not token.is_finished:
+                token.cancel()
+            self.show_status(
+                "AI requests disabled. Any active action is being stopped.",
+                COLOR_WARN,
+            )
+        else:
+            self.show_status("AI requests enabled.", COLOR_SUCCESS, autohide_ms=2000)
+        LOGGER.info("AI actions %s", "enabled" if enabled else "disabled")
+
     def show_option_menu(self, anchor_widget):
         menu = tk.Menu(self.root, tearoff=0, bg=COLOR_BG_CARD, fg=COLOR_TEXT,
                         activebackground=COLOR_ACCENT, activeforeground="white",
                         bd=0)
+        menu.add_checkbutton(
+            label="AI requests enabled",
+            variable=self._ai_actions_enabled_var,
+            command=self._on_ai_actions_toggle,
+        )
+        menu.add_separator()
         default_action = self.settings.get("default_action", "rewrite_same")
         if default_action not in TEMPLATES:
             default_action = "rewrite_same"
         menu.add_command(
             label=f"Run default: {TEMPLATES[default_action]['label']}",
             command=self._run_default_action,
+            state=tk.NORMAL if self._ai_actions_enabled else tk.DISABLED,
         )
         menu.add_separator()
         for key, tmpl in TEMPLATES.items():
             menu.add_command(
                 label=tmpl["label"],
                 command=lambda k=key: self.run_action(k),
+                state=tk.NORMAL if self._ai_actions_enabled else tk.DISABLED,
             )
         menu.add_separator()
         menu.add_command(
@@ -881,122 +977,189 @@ class App:
     # Core Action: grab selection -> call AI -> paste back
     # =========================================================================
     def run_action(self, template_key):
+        if not self._ai_actions_enabled:
+            self.show_status("AI requests are disabled in the floating menu.", COLOR_WARN)
+            return
+
         label = TEMPLATES[template_key]["label"]
+        token = CancellationToken()
+        with self._active_action_lock:
+            active = self._active_action_token
+            if active and not active.is_finished:
+                self.show_status("An action is already running.", COLOR_WARN)
+                return
+            self._active_action_token = token
 
         def worker():
-            LOGGER.info("Action started: %s", template_key)
-            self.show_status(f"Working: {label}...", COLOR_TEXT)
-
-            # ---- Step 1: get selected text ----
             try:
-                text = get_selected_text(target_hwnd=self._last_external_hwnd)
-            except ClipboardError as e:
-                LOGGER.warning("Clipboard read failed (%s)", type(e).__name__)
-                self.show_status(f"Clipboard error: {e}", COLOR_ERROR, autohide_ms=4000)
-                return
-            except Exception as e:
-                _log_exception("Reading selected text", e)
-                self.show_status(f"Unexpected error: {e}", COLOR_ERROR, autohide_ms=4000)
-                return
-
-            if not text or not text.strip():
-                LOGGER.warning(
-                    "Selection copy returned empty text (%s); verify target app focus and copy support",
-                    template_key,
-                )
+                self._run_action_worker(template_key, token, label)
+            except RequestCancelled:
+                LOGGER.info("Action canceled: %s", template_key)
                 self.show_status(
-                    "Couldn't copy selected text. Reselect it and try again.",
-                    COLOR_WARN, autohide_ms=4000,
+                    "Request canceled. No new result was pasted.",
+                    COLOR_WARN, autohide_ms=3500,
                 )
-                return
-
-            # ---- Step 2: call the AI ----
-            settings = load_settings()
-            if not configured_providers(settings):
-                LOGGER.warning("Action stopped: no API key configured")
+            except Exception as exc:
+                _log_exception(f"Running action {template_key}", exc)
                 self.show_status(
-                    "No API key set. Open Settings and add one.",
-                    COLOR_ERROR, autohide_ms=5000,
+                    f"Unexpected error: {exc}", COLOR_ERROR, autohide_ms=6000
                 )
-                return
-
-            self.show_status(
-                f"Contacting {provider_label(settings['provider'], settings)}...",
-                COLOR_TEXT,
-            )
-            attempted_providers = []
-
-            def report_provider(provider):
-                attempted_providers.append(provider)
-                self.show_status(
-                    f"Trying {provider_label(provider, settings)}...", COLOR_TEXT
-                )
-
-            try:
-                result = process_with_fallback(
-                    text=text,
-                    template_key=template_key,
-                    settings=settings,
-                    on_provider=report_provider,
-                )
-            except AIError as e:
-                LOGGER.warning(
-                    "AI request failed: provider=%s error_type=%s",
-                    settings["provider"], type(e).__name__,
-                )
-                self.show_status(str(e), COLOR_ERROR, autohide_ms=6000)
-                return
-            except Exception as e:
-                _log_exception(f"{settings['provider']} request", e)
-                self.show_status(f"Unexpected error: {e}", COLOR_ERROR, autohide_ms=6000)
-                return
-
-            if not result or not result.strip():
-                LOGGER.warning("AI returned an empty response: provider=%s", settings["provider"])
-                self.show_status("AI returned an empty response. Try again.",
-                                  COLOR_ERROR, autohide_ms=4000)
-                return
-
-            used_provider = attempted_providers[-1] if attempted_providers else settings["provider"]
-            if len(attempted_providers) > 1:
-                LOGGER.warning(
-                    "Provider fallback used: primary=%s selected=%s",
-                    settings["provider"], used_provider,
-                )
-
-            # ---- Step 3: paste result back ----
-            try:
-                if settings.get("word_typing_enabled", True):
-                    self.show_status(
-                        f"Writing with {provider_label(used_provider, settings)}... 0%",
-                        COLOR_TEXT,
-                    )
-                    paste_text_streaming(
-                        result,
-                        target_hwnd=self._last_external_hwnd,
-                        on_progress=lambda progress: self.show_status(
-                            f"Writing... {int(progress * 100)}%", COLOR_TEXT
-                        ),
-                    )
-                else:
-                    self.show_status(
-                        f"Pasting with {provider_label(used_provider, settings)}...",
-                        COLOR_TEXT,
-                    )
-                    paste_text(result, target_hwnd=self._last_external_hwnd)
-            except ClipboardError as e:
-                LOGGER.warning("Clipboard paste failed (%s)", type(e).__name__)
-                self.show_status(f"Paste failed: {e}", COLOR_ERROR, autohide_ms=4000)
-                return
-            except Exception as e:
-                _log_exception("Pasting rewritten text", e)
-                self.show_status(f"Unexpected paste error: {e}", COLOR_ERROR, autohide_ms=4000)
-                return
-
-            LOGGER.info("Action completed: %s", template_key)
-            self.show_status("Done", COLOR_SUCCESS, autohide_ms=2500)
+            finally:
+                token.finish()
+                with self._active_action_lock:
+                    if self._active_action_token is token:
+                        self._active_action_token = None
+                try:
+                    self.root.after(0, self._refresh_status_actions)
+                except tk.TclError:
+                    LOGGER.info("Action finished while the application was closing")
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _run_action_worker(self, template_key, token, label):
+        LOGGER.info("Action started: %s", template_key)
+        self.show_status(f"Working: {label}...", COLOR_TEXT)
+        token.raise_if_cancelled()
+
+        try:
+            text = get_selected_text(target_hwnd=self._last_external_hwnd)
+        except ClipboardError as exc:
+            LOGGER.warning("Clipboard read failed (%s)", type(exc).__name__)
+            self.show_status(
+                f"Clipboard error: {exc}", COLOR_ERROR, autohide_ms=4000
+            )
+            return
+
+        token.raise_if_cancelled()
+        if not text or not text.strip():
+            LOGGER.warning(
+                "Selection copy returned empty text (%s); verify target app focus and copy support",
+                template_key,
+            )
+            self.show_status(
+                "Couldn't copy selected text. Reselect it and try again.",
+                COLOR_WARN, autohide_ms=4000,
+            )
+            return
+
+        settings = load_settings()
+        if not self._ai_actions_enabled:
+            token.raise_if_cancelled()
+            return
+        if not configured_providers(settings):
+            LOGGER.warning("Action stopped: no API key configured")
+            self.show_status(
+                "No API key set. Open Settings and add one.",
+                COLOR_ERROR, autohide_ms=5000,
+            )
+            return
+
+        token.set_phase("request")
+        self.show_status(
+            f"Contacting {provider_label(settings['provider'], settings)}...",
+            COLOR_TEXT,
+        )
+        attempted_providers = []
+
+        def report_provider(provider):
+            attempted_providers.append(provider)
+            self.show_status(
+                f"Trying {provider_label(provider, settings)}...", COLOR_TEXT
+            )
+
+        try:
+            result = process_with_fallback(
+                text=text,
+                template_key=template_key,
+                settings=settings,
+                on_provider=report_provider,
+                cancel_token=token,
+            )
+        except RequestCancelled:
+            raise
+        except AIError as exc:
+            LOGGER.warning(
+                "AI request failed: provider=%s error_type=%s",
+                settings["provider"], type(exc).__name__,
+            )
+            self.show_status(str(exc), COLOR_ERROR, autohide_ms=6000)
+            return
+        except Exception as exc:
+            _log_exception(f"{settings['provider']} request", exc)
+            self.show_status(
+                f"Unexpected error: {exc}", COLOR_ERROR, autohide_ms=6000
+            )
+            return
+
+        token.raise_if_cancelled()
+        if not result or not result.strip():
+            LOGGER.warning(
+                "AI returned an empty response: provider=%s", settings["provider"]
+            )
+            self.show_status(
+                "AI returned an empty response. Try again.",
+                COLOR_ERROR, autohide_ms=4000,
+            )
+            return
+
+        used_provider = (
+            attempted_providers[-1] if attempted_providers else settings["provider"]
+        )
+        if len(attempted_providers) > 1:
+            LOGGER.warning(
+                "Provider fallback used: primary=%s selected=%s",
+                settings["provider"], used_provider,
+            )
+
+        token.set_phase("writing")
+        try:
+            if settings.get("word_typing_enabled", True):
+                self.show_status(
+                    f"Writing with {provider_label(used_provider, settings)}... 0%",
+                    COLOR_TEXT,
+                )
+                paste_text_streaming(
+                    result,
+                    target_hwnd=self._last_external_hwnd,
+                    on_progress=lambda progress: self.show_status(
+                        f"Writing... {int(progress * 100)}%", COLOR_TEXT
+                    ),
+                    cancel_event=token.cancel_event,
+                )
+            else:
+                self.show_status(
+                    f"Pasting with {provider_label(used_provider, settings)}...",
+                    COLOR_TEXT,
+                )
+                token.raise_if_cancelled()
+                paste_text(
+                    result,
+                    target_hwnd=self._last_external_hwnd,
+                    cancel_event=token.cancel_event,
+                )
+        except PasteCancelled:
+            LOGGER.info("Streaming paste canceled: %s", template_key)
+            self.show_status(
+                "Writing canceled. Text already pasted remains in the document.",
+                COLOR_WARN, autohide_ms=4000,
+            )
+            return
+        except ClipboardError as exc:
+            LOGGER.warning("Clipboard paste failed (%s)", type(exc).__name__)
+            self.show_status(
+                f"Paste failed: {exc}", COLOR_ERROR, autohide_ms=4000
+            )
+            return
+        except Exception as exc:
+            _log_exception("Pasting rewritten text", exc)
+            self.show_status(
+                f"Unexpected paste error: {exc}",
+                COLOR_ERROR, autohide_ms=4000,
+            )
+            return
+
+        LOGGER.info("Action completed: %s", template_key)
+        self.show_status("Done", COLOR_SUCCESS, autohide_ms=2500)
 
     # =========================================================================
     # App window with pages: Home / Settings / About - each has a Back button
