@@ -14,6 +14,7 @@ $pyinstallerArgs = @(
     "--name=Promptify",
     "--icon=assets/promptify.ico",
     "--add-data=assets/promptify-icon.png;assets",
+    "--collect-all=sounddevice",
     "main.py"
 )
 

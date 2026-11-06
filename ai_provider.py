@@ -8,6 +8,7 @@ consistent no matter which provider/model the user picks.
 """
 
 import asyncio
+import base64
 import io
 import json
 import re
@@ -249,6 +250,15 @@ TEMPLATES = {
             "the source is unclear, preserve the ambiguity instead of "
             "guessing."
             + _TRANSFORMATION_RULES
+        ),
+    },
+    "voice_stt": {
+        "label": "Voice to Text (Roman Urdu / English)",
+        "system_prompt": (
+            "Transcribe spoken audio verbatim. Strictly use Latin / English "
+            "alphabet. If spoken in Urdu or Hindi, write in Roman Urdu. If "
+            "spoken in English, write in standard English. Never use Arabic or "
+            "Urdu script. Return only the raw spoken text."
         ),
     },
 }
@@ -571,6 +581,90 @@ def _call_gemini(
     try:
         result = json.loads(raw)
         return result["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        raise AIError(f"Gemini returned an unexpected response format: {e}")
+
+
+def transcribe_audio_gemini(
+    api_key: str, model: str, audio_bytes: bytes, cancel_token=None,
+) -> str:
+    """
+    Sends WAV audio bytes directly to Gemini Flash multimodal API.
+    Enforces verbatim transcription in Latin / Roman Urdu script.
+    """
+    if not audio_bytes:
+        return ""
+    if not api_key:
+        raise AIError("No Gemini API key set. Open Settings and add your API key first.")
+
+    b64_audio = base64.b64encode(audio_bytes).decode("ascii")
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    stt_prompt = (
+        "You are an expert audio transcription assistant. "
+        "Transcribe this audio recording verbatim with accurate punctuation, capitalization, and formatting.\n\n"
+        "CRITICAL RULES:\n"
+        "1. PRESERVE SPOKEN LANGUAGE: Do not translate what was said.\n"
+        "2. STRICTLY USE LATIN / ENGLISH SCRIPT: If the speaker talks in Urdu, Hindi, or mixed Urdu-English, transcribe it strictly in Roman Urdu (Latin alphabet). NEVER output Arabic or Perso-Arabic Urdu script.\n"
+        "3. If spoken in English, transcribe in standard English.\n"
+        "4. NO INTRO OR COMMENTARY: Output ONLY the raw transcribed words without introductory remarks or timestamps."
+    )
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": "audio/wav",
+                            "data": b64_audio,
+                        }
+                    },
+                    {"text": stt_prompt},
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0.1},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        raw = _send_request(req, cancel_token=cancel_token, timeout=45)
+    except RequestCancelled:
+        raise
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        if e.code in (401, 403):
+            raise AIError("Gemini rejected the API key. Check the key in Settings.")
+        if e.code == 429:
+            raise AIError("Gemini free-tier limit hit (429). Wait a bit and try again.")
+        if e.code == 404:
+            raise AIError(f"Gemini model '{model}' not found. Check the model name in Settings.")
+        raise AIError(f"Gemini API error ({e.code}): {body[:300]}")
+    except (socket.timeout, urllib.error.URLError) as e:
+        raise AIError(_network_friendly_message(e, "Gemini", url))
+    except Exception as e:
+        raise AIError(f"Gemini transcription failed: {e}")
+
+    try:
+        result = json.loads(raw)
+        candidates = result.get("candidates", [])
+        if not candidates:
+            return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text_parts = [p.get("text", "") for p in parts if "text" in p]
+        transcription = " ".join(text_parts).strip()
+        transcription = re.sub(r"^\d{1,2}:\d{2}\s*", "", transcription).strip()
+        return transcription
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         raise AIError(f"Gemini returned an unexpected response format: {e}")
 

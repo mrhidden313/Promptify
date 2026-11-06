@@ -34,6 +34,8 @@ from pynput import keyboard
 from PIL import Image, ImageDraw, ImageTk
 
 from config import load_settings, save_settings
+from audio_recorder import AudioRecorder, AudioRecorderError
+from autostart_helper import is_autostart_enabled, set_autostart
 from ai_provider import (
     DEFAULT_PROVIDER_ORDER,
     TEMPLATES,
@@ -44,6 +46,7 @@ from ai_provider import (
     compatible_chat_completions_url,
     configured_providers,
     process_with_fallback,
+    transcribe_audio_gemini,
     AIError,
     CancellationToken,
     RequestCancelled,
@@ -84,6 +87,7 @@ LOG_FILE = None
 INSTANCE_MUTEX = None
 INSTANCE_MUTEX_NAME = "Local\\Promptify.SingleInstance.v1"
 DEFAULT_HOTKEY = "<ctrl>+<alt>+f"
+DEFAULT_VOICE_HOTKEY = "<ctrl>+<shift>+<space>"
 HOTKEY_MODIFIERS = ("ctrl", "alt", "shift", "cmd")
 HOTKEY_MODIFIER_ALIASES = {
     "control": "ctrl",
@@ -135,7 +139,11 @@ def normalize_hotkey(value):
 def format_hotkey(value):
     """Format a normalized pynput hotkey for display in Settings."""
     parts = [part.strip("<>") for part in value.split("+")]
-    return "+".join(part.upper() if len(part) == 1 else part.title() for part in parts)
+    labels = {"cmd": "Win"}
+    return "+".join(
+        labels.get(part, part.upper() if len(part) == 1 else part.title())
+        for part in parts
+    )
 
 
 def acquire_single_instance():
@@ -306,6 +314,10 @@ class App:
         self._signal_after_id = None
         self._foreground_after_id = None
         self._hotkey_listener = None
+        self._modifier_toggle_listener = None
+        self._pressed_modifier_keys = set()
+        self._modifier_combo_active = False
+        self._modifier_combo_lock = threading.Lock()
         self._recording_listener = None
         self._hotkey_recording_context = None
         self._position_locked = self.settings.get("position_locked", False)
@@ -331,6 +343,8 @@ class App:
         self.status_label = None
         self.status_copy_button = None
         self.status_cancel_button = None
+        self.status_voice_stop_button = None
+        self._audio_recorder = AudioRecorder()
         self._status_copy_text = ""
         self._status_after_id = None
 
@@ -353,6 +367,8 @@ class App:
             self._configure_global_hotkey(
                 self.settings.get("hotkey", DEFAULT_HOTKEY),
                 self.settings.get("hotkey_enabled", True),
+                self.settings.get("voice_hotkey", DEFAULT_VOICE_HOTKEY),
+                self.settings.get("voice_hotkey_enabled", True),
             )
         except Exception as exc:
             _log_exception("Registering global shortcut", exc)
@@ -399,6 +415,11 @@ class App:
         self._closing = True
         self._cancel_hotkey_recording()
         self._stop_global_hotkey()
+        try:
+            if hasattr(self, "_audio_recorder") and self._audio_recorder.is_recording:
+                self._audio_recorder.stop_recording()
+        except Exception:
+            pass
         for after_id in (self._signal_after_id, self._foreground_after_id):
             if after_id:
                 try:
@@ -420,18 +441,45 @@ class App:
         _log_exception("Tkinter callback", value, tb)
 
     def _stop_global_hotkey(self):
-        listener = self._hotkey_listener
+        listeners = (self._hotkey_listener, self._modifier_toggle_listener)
         self._hotkey_listener = None
-        if listener:
-            listener.stop()
-            if listener is not threading.current_thread():
-                listener.join(timeout=1)
+        self._modifier_toggle_listener = None
+        for listener in listeners:
+            if listener:
+                listener.stop()
+                if listener is not threading.current_thread():
+                    listener.join(timeout=1)
+        with self._modifier_combo_lock:
+            self._pressed_modifier_keys.clear()
+            self._modifier_combo_active = False
 
-    def _start_global_hotkey(self, hotkey):
+    def _start_global_hotkey(self, hotkey, enabled=None, voice_hotkey=None, voice_enabled=None):
         normalized = normalize_hotkey(hotkey)
-        listener = keyboard.GlobalHotKeys({
-            normalized: self._dispatch_default_action,
-        })
+        if enabled is None:
+            enabled = self.settings.get("hotkey_enabled", True)
+        if voice_hotkey is None:
+            voice_hotkey = self.settings.get("voice_hotkey", DEFAULT_VOICE_HOTKEY)
+        if voice_enabled is None:
+            voice_enabled = self.settings.get("voice_hotkey_enabled", True)
+
+        hotkey_dict = {}
+        if enabled:
+            hotkey_dict[normalized] = self._dispatch_default_action
+
+        normalized_voice = None
+        if voice_enabled and voice_hotkey:
+            try:
+                normalized_voice = normalize_hotkey(voice_hotkey)
+                hotkey_dict[normalized_voice] = self._dispatch_voice_action
+            except Exception as exc:
+                LOGGER.warning("Could not normalize voice shortcut %s: %s", voice_hotkey, exc)
+
+        if not hotkey_dict:
+            self._hotkey_listener = None
+            LOGGER.info("Global shortcuts are disabled")
+            return normalized
+
+        listener = keyboard.GlobalHotKeys(hotkey_dict)
         started = False
         try:
             listener.start()
@@ -446,25 +494,97 @@ class App:
                 listener.join(timeout=1)
             raise
         self._hotkey_listener = listener
-        LOGGER.info("Global shortcut registered: %s", format_hotkey(normalized))
+        LOGGER.info(
+            "Global shortcuts registered: default=%s voice=%s",
+            format_hotkey(normalized) if enabled else "off",
+            format_hotkey(normalized_voice) if normalized_voice else "off",
+        )
         return normalized
 
-    def _configure_global_hotkey(self, hotkey, enabled):
+    def _start_modifier_toggle_listener(self):
+        with self._modifier_combo_lock:
+            self._pressed_modifier_keys.clear()
+            self._modifier_combo_active = False
+
+        def on_press(key):
+            key_name = getattr(key, "name", None)
+            if key_name not in ("ctrl_l", "ctrl_r", "cmd", "cmd_l", "cmd_r"):
+                return
+            with self._modifier_combo_lock:
+                self._pressed_modifier_keys.add(key_name)
+                ctrl_down = any(
+                    name in self._pressed_modifier_keys
+                    for name in ("ctrl_l", "ctrl_r")
+                )
+                win_down = any(
+                    name in self._pressed_modifier_keys
+                    for name in ("cmd", "cmd_l", "cmd_r")
+                )
+                should_toggle = (
+                    ctrl_down and win_down and not self._modifier_combo_active
+                )
+                self._modifier_combo_active = ctrl_down and win_down
+            if should_toggle:
+                self._dispatch_ai_toggle()
+
+        def on_release(key):
+            key_name = getattr(key, "name", None)
+            if key_name not in ("ctrl_l", "ctrl_r", "cmd", "cmd_l", "cmd_r"):
+                return
+            with self._modifier_combo_lock:
+                self._pressed_modifier_keys.discard(key_name)
+                ctrl_down = any(
+                    name in self._pressed_modifier_keys
+                    for name in ("ctrl_l", "ctrl_r")
+                )
+                win_down = any(
+                    name in self._pressed_modifier_keys
+                    for name in ("cmd", "cmd_l", "cmd_r")
+                )
+                self._modifier_combo_active = ctrl_down and win_down
+
+        listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        started = False
+        try:
+            listener.start()
+            started = True
+            listener.wait()
+            if not listener.is_alive():
+                listener.join(timeout=0)
+                raise RuntimeError("The AI toggle listener stopped before it was ready.")
+        except Exception:
+            if started:
+                listener.stop()
+                listener.join(timeout=1)
+            raise
+        self._modifier_toggle_listener = listener
+        LOGGER.info("AI enable/disable shortcut registered: Ctrl+Win")
+
+    def _configure_global_hotkey(self, hotkey, enabled, voice_hotkey=None, voice_enabled=None):
         normalized = normalize_hotkey(hotkey)
         old_listener = self._hotkey_listener
+        old_toggle_listener = self._modifier_toggle_listener
         old_hotkey = getattr(self, "_registered_hotkey", None)
+        old_enabled = getattr(
+            self, "_registered_hotkey_enabled",
+            self.settings.get("hotkey_enabled", True),
+        )
         self._stop_global_hotkey()
         try:
-            if enabled:
-                normalized = self._start_global_hotkey(normalized)
+            normalized = self._start_global_hotkey(
+                normalized, bool(enabled), voice_hotkey, voice_enabled
+            )
+            self._start_modifier_toggle_listener()
             self._registered_hotkey = normalized
             self._registered_hotkey_enabled = bool(enabled)
         except Exception:
-            if old_listener and old_hotkey:
+            self._stop_global_hotkey()
+            if (old_listener or old_toggle_listener) and old_hotkey:
                 try:
-                    self._start_global_hotkey(old_hotkey)
+                    self._start_global_hotkey(old_hotkey, old_enabled)
+                    self._start_modifier_toggle_listener()
                     self._registered_hotkey = old_hotkey
-                    self._registered_hotkey_enabled = True
+                    self._registered_hotkey_enabled = old_enabled
                 except Exception as restore_exc:
                     _log_exception("Restoring previous global shortcut", restore_exc)
             raise
@@ -476,6 +596,32 @@ class App:
         except tk.TclError:
             LOGGER.info("Shortcut ignored while application is closing")
 
+    def _dispatch_voice_action(self):
+        try:
+            self.root.after(0, self._trigger_voice_dictation)
+        except tk.TclError:
+            LOGGER.info("Voice shortcut ignored while application is closing")
+
+    def _trigger_voice_dictation(self):
+        if self._closing:
+            return
+        if not self._ai_actions_enabled:
+            self.show_status("AI requests are disabled in the floating menu.", COLOR_WARN)
+            return
+        self.start_or_stop_voice_dictation()
+
+    def _dispatch_ai_toggle(self):
+        try:
+            self.root.after(0, self._toggle_ai_actions_from_shortcut)
+        except tk.TclError:
+            LOGGER.info("AI toggle shortcut ignored while application is closing")
+
+    def _toggle_ai_actions_from_shortcut(self):
+        if self._closing:
+            return
+        self._ai_actions_enabled_var.set(not self._ai_actions_enabled)
+        self._on_ai_actions_toggle()
+
     def _run_default_action(self):
         if self._closing:
             return
@@ -483,7 +629,7 @@ class App:
             self.show_status("AI requests are disabled in the floating menu.", COLOR_WARN)
             return
         action = self.settings.get("default_action", "rewrite_same")
-        if action not in TEMPLATES:
+        if action not in ("rewrite_same", "roman_urdu", "translate_enhance"):
             action = "rewrite_same"
         LOGGER.info("Default shortcut action triggered: %s", action)
         self.run_action(action)
@@ -783,6 +929,12 @@ class App:
             activebackground=COLOR_BG_CARD, activeforeground=COLOR_ERROR,
             relief="flat", bd=0, cursor="hand2",
         )
+        self.status_voice_stop_button = tk.Button(
+            actions, text="Stop & Type", command=self.start_or_stop_voice_dictation,
+            font=FONT_SMALL, bg=COLOR_ACCENT, fg="white",
+            activebackground=COLOR_ACCENT_HOVER, activeforeground="white",
+            relief="flat", bd=0, cursor="hand2", padx=6, pady=2,
+        )
         tk.Button(
             actions, text="Dismiss", command=self.hide_status,
             font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_SUBTEXT,
@@ -866,16 +1018,34 @@ class App:
             and token.phase in ("request", "writing")
             and not token.is_cancelled
         )
-        if can_cancel:
-            self.status_cancel_button.config(
-                text="Stop writing" if token.phase == "writing" else "Cancel"
-            )
-            if not self.status_cancel_button.winfo_manager():
+        if self._audio_recorder and self._audio_recorder.is_recording:
+            if self.status_voice_stop_button and not self.status_voice_stop_button.winfo_manager():
+                self.status_voice_stop_button.pack(side="left", padx=(0, 6))
+            if self.status_cancel_button and not self.status_cancel_button.winfo_manager():
+                self.status_cancel_button.config(text="Cancel")
                 self.status_cancel_button.pack(side="right", padx=(0, 8))
         else:
-            self.status_cancel_button.pack_forget()
+            if self.status_voice_stop_button and self.status_voice_stop_button.winfo_manager():
+                self.status_voice_stop_button.pack_forget()
+            if can_cancel:
+                self.status_cancel_button.config(
+                    text="Stop writing" if token.phase == "writing" else "Cancel"
+                )
+                if not self.status_cancel_button.winfo_manager():
+                    self.status_cancel_button.pack(side="right", padx=(0, 8))
+            else:
+                if self.status_cancel_button:
+                    self.status_cancel_button.pack_forget()
 
     def cancel_active_action(self):
+        if self._audio_recorder and self._audio_recorder.is_recording:
+            try:
+                self._audio_recorder.stop_recording()
+            except Exception:
+                pass
+            self.show_status("Voice recording canceled.", COLOR_WARN, autohide_ms=2500)
+            return
+
         with self._active_action_lock:
             token = self._active_action_token
         if (
@@ -951,12 +1121,18 @@ class App:
             state=tk.NORMAL if self._ai_actions_enabled else tk.DISABLED,
         )
         menu.add_separator()
-        for key, tmpl in TEMPLATES.items():
+        for key in ("rewrite_same", "roman_urdu", "translate_enhance"):
             menu.add_command(
-                label=tmpl["label"],
+                label=TEMPLATES[key]["label"],
                 command=lambda k=key: self.run_action(k),
                 state=tk.NORMAL if self._ai_actions_enabled else tk.DISABLED,
             )
+        menu.add_separator()
+        menu.add_command(
+            label="🎙️ Voice to Text (Speak & Type)",
+            command=self.start_or_stop_voice_dictation,
+            state=tk.NORMAL if self._ai_actions_enabled else tk.DISABLED,
+        )
         menu.add_separator()
         menu.add_command(
             label="Unlock Position" if self._position_locked else "Lock Position",
@@ -974,11 +1150,141 @@ class App:
             menu.grab_release()
 
     # =========================================================================
+    # Voice Dictation (STT with Gemini)
+    # =========================================================================
+    def start_or_stop_voice_dictation(self):
+        """Toggle recording speech and transcribing it to text."""
+        if not self._ai_actions_enabled:
+            self.show_status("AI requests are disabled in the floating menu.", COLOR_WARN)
+            return
+
+        if self._audio_recorder and self._audio_recorder.is_recording:
+            self.show_status("⚡ Processing audio...", COLOR_TEXT)
+            self._stop_and_transcribe_voice()
+            return
+
+        with self._active_action_lock:
+            active = self._active_action_token
+            if active and not active.is_finished:
+                self.show_status("An action is already running.", COLOR_WARN)
+                return
+
+        settings = load_settings()
+        gemini_key = settings.get("gemini_api_key") or settings.get("api_key")
+        if not gemini_key:
+            self.show_status(
+                "No Gemini API key set. Open Settings and add your Gemini API key.",
+                COLOR_ERROR, autohide_ms=5000,
+            )
+            return
+
+        # Capture currently focused window
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if hwnd:
+                self._last_external_hwnd = int(hwnd)
+        except Exception:
+            pass
+
+        try:
+            self._audio_recorder.start_recording()
+        except AudioRecorderError as exc:
+            self.show_status(f"Mic error: {exc}", COLOR_ERROR, autohide_ms=4000)
+            return
+
+        voice_chord = self.settings.get("voice_hotkey", DEFAULT_VOICE_HOTKEY)
+        try:
+            formatted_chord = format_hotkey(normalize_hotkey(voice_chord))
+        except Exception:
+            formatted_chord = "shortcut"
+
+        self.show_status(
+            f"🎙️ Listening... (Press {formatted_chord} or click Stop & Type)",
+            COLOR_WARN,
+        )
+
+    def _stop_and_transcribe_voice(self):
+        token = CancellationToken()
+        with self._active_action_lock:
+            self._active_action_token = token
+
+        def worker():
+            try:
+                audio_bytes = self._audio_recorder.stop_recording()
+                if not audio_bytes or len(audio_bytes) < 4000:
+                    self.show_status("No speech detected. Try again.", COLOR_WARN, autohide_ms=3000)
+                    return
+
+                token.set_phase("request")
+                self.show_status("⚡ Transcribing with Gemini...", COLOR_TEXT)
+
+                settings = load_settings()
+                gemini_key = settings.get("gemini_api_key") or settings.get("api_key")
+                model = settings.get("model", "gemini-3.5-flash-lite")
+                if not gemini_key:
+                    self.show_status("No Gemini API key set. Open Settings.", COLOR_ERROR, autohide_ms=4000)
+                    return
+
+                text = transcribe_audio_gemini(
+                    gemini_key, model, audio_bytes, cancel_token=token
+                )
+                token.raise_if_cancelled()
+
+                if not text or not text.strip():
+                    self.show_status("No speech detected or empty response. Try again.", COLOR_WARN, autohide_ms=3500)
+                    return
+
+                token.set_phase("writing")
+                if settings.get("word_typing_enabled", True):
+                    self.show_status("Writing transcribed text... 0%", COLOR_TEXT)
+                    paste_text_streaming(
+                        text,
+                        target_hwnd=self._last_external_hwnd,
+                        on_progress=lambda progress: self.show_status(
+                            f"Writing transcribed text... {int(progress * 100)}%", COLOR_TEXT
+                        ),
+                        cancel_event=token.cancel_event,
+                    )
+                else:
+                    self.show_status("Pasting transcribed text...", COLOR_TEXT)
+                    paste_text(
+                        text,
+                        target_hwnd=self._last_external_hwnd,
+                        cancel_event=token.cancel_event,
+                    )
+
+                self.show_status("✓ Transcribed and typed!", COLOR_SUCCESS, autohide_ms=2500)
+            except RequestCancelled:
+                self.show_status("Voice dictation canceled.", COLOR_WARN, autohide_ms=3000)
+            except AIError as exc:
+                LOGGER.warning("Voice transcription failed: %s", exc)
+                self.show_status(str(exc), COLOR_ERROR, autohide_ms=6000)
+            except Exception as exc:
+                _log_exception("Voice dictation worker", exc)
+                self.show_status(f"Transcription error: {exc}", COLOR_ERROR, autohide_ms=5000)
+            finally:
+                token.finish()
+                with self._active_action_lock:
+                    if self._active_action_token is token:
+                        self._active_action_token = None
+                try:
+                    self.root.after(0, self._refresh_status_actions)
+                except tk.TclError:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # =========================================================================
     # Core Action: grab selection -> call AI -> paste back
     # =========================================================================
     def run_action(self, template_key):
         if not self._ai_actions_enabled:
             self.show_status("AI requests are disabled in the floating menu.", COLOR_WARN)
+            return
+
+        if template_key == "voice_stt":
+            self.start_or_stop_voice_dictation()
             return
 
         label = TEMPLATES[template_key]["label"]
@@ -1492,20 +1798,27 @@ class App:
             font=FONT_SMALL,
         ).pack(anchor="w")
 
-        tk.Label(body, text="Quick actions", font=FONT_LABEL, bg=COLOR_BG,
-                 fg=COLOR_TEXT).pack(anchor="w", pady=(12, 3))
-        action_keys = list(TEMPLATES)
-        action_labels = [TEMPLATES[key]["label"] for key in action_keys]
+        # =====================================================================
+        # Section 1: Prompt Enhancement (Text Rewriting)
+        # =====================================================================
+        prompt_section = tk.LabelFrame(
+            body, text="Prompt Enhancement (Selected Text)", font=FONT_LABEL,
+            bg=COLOR_BG, fg=COLOR_TEXT, padx=12, pady=10, relief="groove", bd=1,
+        )
+        prompt_section.pack(fill="x", pady=(14, 8))
+
+        text_action_keys = ["rewrite_same", "roman_urdu", "translate_enhance"]
+        text_action_labels = [TEMPLATES[key]["label"] for key in text_action_keys]
         default_action = settings.get("default_action", "rewrite_same")
-        if default_action not in TEMPLATES:
+        if default_action not in text_action_keys:
             default_action = "rewrite_same"
         default_action_var = tk.StringVar(value=TEMPLATES[default_action]["label"])
-        action_row = tk.Frame(body, bg=COLOR_BG)
-        action_row.pack(fill="x", pady=(0, 4))
+        action_row = tk.Frame(prompt_section, bg=COLOR_BG)
+        action_row.pack(fill="x", pady=(0, 6))
         tk.Label(action_row, text="Default action", font=FONT_SMALL,
                  bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(side="left", padx=(0, 8))
         ttk.Combobox(
-            action_row, textvariable=default_action_var, values=action_labels,
+            action_row, textvariable=default_action_var, values=text_action_labels,
             state="readonly", width=31,
         ).pack(side="left")
 
@@ -1513,12 +1826,12 @@ class App:
             value=settings.get("hotkey_enabled", True)
         )
         tk.Checkbutton(
-            body, text="Enable global shortcut",
+            prompt_section, text="Enable prompt enhancement shortcut",
             variable=shortcut_enabled_var, bg=COLOR_BG, fg=COLOR_TEXT,
             selectcolor=COLOR_BG_CARD, activebackground=COLOR_BG,
             font=FONT_SMALL,
-        ).pack(anchor="w", pady=(2, 3))
-        shortcut_row = tk.Frame(body, bg=COLOR_BG)
+        ).pack(anchor="w", pady=(2, 4))
+        shortcut_row = tk.Frame(prompt_section, bg=COLOR_BG)
         shortcut_row.pack(fill="x")
         tk.Label(shortcut_row, text="Shortcut", font=FONT_SMALL,
                  bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(side="left", padx=(0, 8))
@@ -1557,12 +1870,82 @@ class App:
             relief="flat", bd=0, cursor="hand2", padx=10, pady=5,
         ).pack(side="left")
         shortcut_status_label = tk.Label(
-            body,
-            text="The shortcut runs the selected default action. Example: Ctrl+Alt+F.",
+            prompt_section,
+            text=(
+                "Runs selected rewrite on highlighted text (e.g. Ctrl+Alt+F or custom). "
+                "Press Ctrl+Win to toggle AI requests."
+            ),
             font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
-            wraplength=510, justify="left",
+            wraplength=480, justify="left",
         )
-        shortcut_status_label.pack(anchor="w", pady=(2, 0))
+        shortcut_status_label.pack(anchor="w", pady=(3, 0))
+
+        # =====================================================================
+        # Section 2: Voice Dictation (Speech to Text)
+        # =====================================================================
+        voice_section = tk.LabelFrame(
+            body, text="Voice Dictation (Speech to Text)", font=FONT_LABEL,
+            bg=COLOR_BG, fg=COLOR_TEXT, padx=12, pady=10, relief="groove", bd=1,
+        )
+        voice_section.pack(fill="x", pady=(6, 8))
+
+        voice_shortcut_enabled_var = tk.BooleanVar(
+            value=settings.get("voice_hotkey_enabled", True)
+        )
+        tk.Checkbutton(
+            voice_section, text="Enable voice dictation shortcut",
+            variable=voice_shortcut_enabled_var, bg=COLOR_BG, fg=COLOR_TEXT,
+            selectcolor=COLOR_BG_CARD, activebackground=COLOR_BG,
+            font=FONT_SMALL,
+        ).pack(anchor="w", pady=(2, 4))
+        voice_shortcut_row = tk.Frame(voice_section, bg=COLOR_BG)
+        voice_shortcut_row.pack(fill="x")
+        tk.Label(voice_shortcut_row, text="Voice shortcut", font=FONT_SMALL,
+                 bg=COLOR_BG, fg=COLOR_SUBTEXT).pack(side="left", padx=(0, 8))
+        saved_voice_hotkey = settings.get("voice_hotkey", DEFAULT_VOICE_HOTKEY)
+        try:
+            saved_voice_hotkey = format_hotkey(normalize_hotkey(saved_voice_hotkey))
+        except ValueError:
+            saved_voice_hotkey = format_hotkey(DEFAULT_VOICE_HOTKEY)
+        voice_hotkey_var = tk.StringVar(value=saved_voice_hotkey)
+        voice_hotkey_entry = tk.Entry(
+            voice_shortcut_row, textvariable=voice_hotkey_var, width=19,
+            bg=COLOR_BG_CARD, fg=COLOR_TEXT, insertbackground=COLOR_TEXT,
+            relief="flat",
+        )
+        voice_hotkey_entry.pack(side="left", ipady=4, padx=(0, 6))
+        voice_record_button = tk.Button(
+            voice_shortcut_row, text="Record", command=lambda: self.start_hotkey_recording(
+                voice_hotkey_var, voice_shortcut_status_label, voice_record_button
+            ),
+            font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT,
+            activebackground=COLOR_ACCENT, activeforeground="white",
+            relief="flat", bd=0, cursor="hand2", padx=10, pady=5,
+        )
+        voice_record_button.pack(side="left", padx=(0, 5))
+
+        def use_default_voice_hotkey():
+            voice_hotkey_var.set(format_hotkey(DEFAULT_VOICE_HOTKEY))
+            voice_shortcut_status_label.config(
+                text="Default voice shortcut restored. Save to apply.", fg=COLOR_SUBTEXT
+            )
+
+        tk.Button(
+            voice_shortcut_row, text="Default", command=use_default_voice_hotkey,
+            font=FONT_SMALL, bg=COLOR_BG_CARD, fg=COLOR_TEXT,
+            activebackground=COLOR_ACCENT, activeforeground="white",
+            relief="flat", bd=0, cursor="hand2", padx=10, pady=5,
+        ).pack(side="left")
+        voice_shortcut_status_label = tk.Label(
+            voice_section,
+            text=(
+                "Press shortcut anywhere to record speech. Gemini transcribes verbatim "
+                "into Roman Urdu or English and types at your active cursor."
+            ),
+            font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT,
+            wraplength=480, justify="left",
+        )
+        voice_shortcut_status_label.pack(anchor="w", pady=(3, 0))
 
         position_locked_var = tk.BooleanVar(value=self._position_locked)
         tk.Checkbutton(
@@ -1572,6 +1955,19 @@ class App:
             bg=COLOR_BG, fg=COLOR_TEXT, selectcolor=COLOR_BG_CARD,
             activebackground=COLOR_BG, font=FONT_SMALL,
         ).pack(anchor="w", pady=(4, 0))
+
+        autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+        tk.Checkbutton(
+            body, text="Start Promptify automatically on Windows startup",
+            variable=autostart_var,
+            bg=COLOR_BG, fg=COLOR_TEXT, selectcolor=COLOR_BG_CARD,
+            activebackground=COLOR_BG, font=FONT_SMALL,
+        ).pack(anchor="w", pady=(6, 0))
+        tk.Label(
+            body,
+            text="Runs silently in background when your PC turns on. Never click the .exe manually.",
+            font=FONT_SMALL, bg=COLOR_BG, fg=COLOR_SUBTEXT, wraplength=480, justify="left",
+        ).pack(anchor="w", pady=(1, 0))
 
         tk.Label(body, text="Provider API keys", font=FONT_LABEL, bg=COLOR_BG,
                  fg=COLOR_TEXT).pack(anchor="w", pady=(14, 4))
@@ -1607,6 +2003,7 @@ class App:
 
         def save():
             new_settings = dict(settings)
+            new_settings["ai_actions_enabled"] = self._ai_actions_enabled
             selected_provider = selected_provider_key()
             model_values[selected_model_provider["value"]] = model_var.get().strip()
             new_settings["provider"] = selected_provider
@@ -1635,10 +2032,14 @@ class App:
                     fg=COLOR_ERROR,
                 )
                 return
-            new_settings["default_action"] = action_keys[
-                action_labels.index(default_action_var.get())
+            new_settings["default_action"] = text_action_keys[
+                text_action_labels.index(default_action_var.get())
             ]
             new_settings["position_locked"] = self._position_locked
+            new_autostart = autostart_var.get()
+            if new_autostart != is_autostart_enabled():
+                set_autostart(new_autostart)
+            new_settings["autostart_enabled"] = new_autostart
             new_settings["custom_provider_name"] = (
                 custom_name_var.get().strip()[:40] or "Custom provider"
             )
@@ -1648,13 +2049,22 @@ class App:
                 new_settings["floating_y"] = self.floating_btn.winfo_y()
             old_hotkey = self.settings.get("hotkey", DEFAULT_HOTKEY)
             old_hotkey_enabled = self.settings.get("hotkey_enabled", True)
+            old_voice_hotkey = self.settings.get("voice_hotkey", DEFAULT_VOICE_HOTKEY)
+            old_voice_enabled = self.settings.get("voice_hotkey_enabled", True)
             try:
                 normalized_hotkey = normalize_hotkey(hotkey_var.get())
             except ValueError as e:
                 status_label.config(text=str(e), fg=COLOR_ERROR)
                 return
+            try:
+                normalized_voice_hotkey = normalize_hotkey(voice_hotkey_var.get())
+            except ValueError as e:
+                status_label.config(text=f"Voice shortcut: {e}", fg=COLOR_ERROR)
+                return
             new_settings["hotkey"] = normalized_hotkey
             new_settings["hotkey_enabled"] = shortcut_enabled_var.get()
+            new_settings["voice_hotkey"] = normalized_voice_hotkey
+            new_settings["voice_hotkey_enabled"] = voice_shortcut_enabled_var.get()
             for provider, key_var in key_vars.items():
                 try:
                     new_settings[f"{provider}_api_key"] = normalize_api_key(
@@ -1685,12 +2095,17 @@ class App:
                 return
             try:
                 self._configure_global_hotkey(
-                    normalized_hotkey, new_settings["hotkey_enabled"]
+                    normalized_hotkey,
+                    new_settings["hotkey_enabled"],
+                    normalized_voice_hotkey,
+                    new_settings["voice_hotkey_enabled"],
                 )
                 save_settings(new_settings)
             except Exception as e:
                 try:
-                    self._configure_global_hotkey(old_hotkey, old_hotkey_enabled)
+                    self._configure_global_hotkey(
+                        old_hotkey, old_hotkey_enabled, old_voice_hotkey, old_voice_enabled
+                    )
                 except Exception as restore_exc:
                     _log_exception("Restoring previous shortcut after save failure", restore_exc)
                 _log_exception("Saving settings", e)
@@ -1700,6 +2115,7 @@ class App:
                 return
             self.settings = new_settings
             hotkey_var.set(format_hotkey(normalized_hotkey))
+            voice_hotkey_var.set(format_hotkey(normalized_voice_hotkey))
             LOGGER.info(
                 "Settings saved: provider=%s model=%s api_key_configured=%s",
                 new_settings["provider"], new_settings["model"],

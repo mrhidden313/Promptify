@@ -11,6 +11,7 @@ settings.json
 *.tmp
 *.spec
 *.exe
+!downloads/*.exe
 *.dll
 *.pdb
 build/

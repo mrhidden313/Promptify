@@ -33,6 +33,9 @@ DEFAULT_SETTINGS = {
     "default_action": "rewrite_same",
     "hotkey": "<ctrl>+<alt>+f",
     "hotkey_enabled": True,
+    "voice_hotkey": "<ctrl>+<shift>+<space>",
+    "voice_hotkey_enabled": True,
+    "autostart_enabled": False,
     "position_locked": False,
     "floating_x": 40,
     "floating_y": 40,
@@ -95,6 +98,7 @@ def load_settings():
     # Merge with defaults so new fields introduced later don't break old configs
     merged = dict(DEFAULT_SETTINGS)
     merged.update(data)
+    merged.pop("toggle_hotkey", None)
     encrypted_credentials = data.get(ENCRYPTED_CREDENTIALS_FIELD, {})
     credential_store_error = ""
     if isinstance(encrypted_credentials, dict):
@@ -135,6 +139,12 @@ def load_settings():
         merged["hotkey"] = DEFAULT_SETTINGS["hotkey"]
     if not isinstance(merged.get("hotkey_enabled"), bool):
         merged["hotkey_enabled"] = DEFAULT_SETTINGS["hotkey_enabled"]
+    if not isinstance(merged.get("voice_hotkey"), str):
+        merged["voice_hotkey"] = DEFAULT_SETTINGS["voice_hotkey"]
+    if not isinstance(merged.get("voice_hotkey_enabled"), bool):
+        merged["voice_hotkey_enabled"] = DEFAULT_SETTINGS["voice_hotkey_enabled"]
+    if not isinstance(merged.get("autostart_enabled"), bool):
+        merged["autostart_enabled"] = DEFAULT_SETTINGS["autostart_enabled"]
     if not isinstance(merged.get("position_locked"), bool):
         merged["position_locked"] = DEFAULT_SETTINGS["position_locked"]
     for coordinate in ("floating_x", "floating_y"):
